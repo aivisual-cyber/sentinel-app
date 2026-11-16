@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 
@@ -62,9 +62,18 @@ async fn start_python_backend_internal(state: Arc<AppState>) -> Result<bool, Str
     }
 
     // Additional check: test if port 8765 is already in use
-    if let Ok(_) = std::net::TcpStream::connect("127.0.0.1:8765") {
-        println!("Port 8765 already in use, backend likely already running");
-        return Ok(true);
+    if std::net::TcpStream::connect("127.0.0.1:8765").is_ok() {
+        let url = format!("{}/api/health", state.api_base_url);
+        let is_sentinel = match state.client.get(&url).timeout(Duration::from_secs(2)).send().await {
+            Ok(r) => r.json::<serde_json::Value>().await.ok()
+                .and_then(|v| v.get("detector_loaded").cloned()).is_some(),
+            Err(_) => false,
+        };
+        if is_sentinel {
+            println!("Sentinel backend already running on port 8765");
+            return Ok(true);
+        }
+        return Err("Port 8765 is in use by another program; Sentinel backend cannot start".to_string());
     }
 
     // Start Python backend with virtual environment - cross-platform approach
@@ -120,9 +129,16 @@ async fn start_python_backend_internal(state: Arc<AppState>) -> Result<bool, Str
         return Err(format!("Backend script not found: {:?}", backend_script));
     }
     
+    let sentinel_home = backend_script
+        .parent().and_then(|p| p.parent())
+        .ok_or("Failed to resolve SENTINEL_HOME")?
+        .to_path_buf();
+
     let child = Command::new(&python_executable)
         .arg("-u")  // Unbuffered output
         .arg(&backend_script)
+        .current_dir(&sentinel_home)
+        .env("SENTINEL_HOME", &sentinel_home)
         .stdout(Stdio::inherit())  // Show output for debugging
         .stderr(Stdio::inherit())  // Show errors for debugging
         .spawn()
@@ -148,14 +164,14 @@ async fn start_python_backend_internal(state: Arc<AppState>) -> Result<bool, Str
     Ok(true)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn start_python_backend(state: State<'_, AppState>) -> Result<bool, String> {
     // Create Arc from the managed state
     let state_arc = Arc::new(state.inner().clone());
     start_python_backend_internal(state_arc).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn stop_python_backend(state: State<'_, AppState>) -> Result<bool, String> {
     let mut process_guard = state.python_process.lock().unwrap();
     
@@ -169,7 +185,7 @@ async fn stop_python_backend(state: State<'_, AppState>) -> Result<bool, String>
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn get_dashboard_data(state: State<'_, AppState>) -> Result<DashboardData, String> {
     let url = format!("{}/api/dashboard", state.api_base_url);
     
@@ -224,7 +240,7 @@ async fn update_threshold(
     Ok(response_data.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn acknowledge_alert(
     state: State<'_, AppState>,
     alert_id: String
@@ -255,7 +271,7 @@ async fn acknowledge_alert(
     Ok(response_data.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn get_camera_feeds(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let url = format!("{}/api/cameras", state.api_base_url);
     
@@ -277,14 +293,24 @@ async fn get_camera_feeds(state: State<'_, AppState>) -> Result<serde_json::Valu
     Ok(data)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, String> {
-    let process_guard = state.python_process.lock().unwrap();
-    
-    let (backend_running, python_pid) = if let Some(ref child) = *process_guard {
-        (true, Some(child.id()))
-    } else {
-        (false, None)
+    let python_pid = {
+        let mut guard = state.python_process.lock().unwrap();
+        match guard.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(None) => Some(child.id()),
+                _ => { *guard = None; None }  // exited or unknown
+            },
+            None => None,
+        }
+    };
+    // Backend counts as running only if detection reports healthy (works for externally started backends too)
+    let url = format!("{}/api/health", state.api_base_url);
+    let backend_running = match state.client.get(&url).timeout(Duration::from_secs(2)).send().await {
+        Ok(r) => r.json::<serde_json::Value>().await.ok()
+            .and_then(|v| v.get("backend_running").and_then(|b| b.as_bool())).unwrap_or(false),
+        Err(_) => false,
     };
 
     Ok(SystemStatus {
@@ -297,7 +323,7 @@ async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, S
     })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn get_camera_frame(
     state: State<'_, AppState>,
     camera_id: String
@@ -322,7 +348,7 @@ async fn get_camera_frame(
     Ok(data)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn get_system_metrics(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let url = format!("{}/api/metrics", state.api_base_url);
     
@@ -344,7 +370,7 @@ async fn get_system_metrics(state: State<'_, AppState>) -> Result<serde_json::Va
     Ok(data)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn discover_cameras(
     state: State<'_, AppState>,
     timeout: Option<u32>
@@ -374,7 +400,7 @@ async fn discover_cameras(
     Ok(data)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn add_camera(
     state: State<'_, AppState>,
     camera_id: String,
@@ -400,15 +426,12 @@ async fn add_camera(
     let response = state.client
         .post(&url)
         .json(&payload)
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| format!("Failed to add camera: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err(format!("API error: {}", response.status()));
-    }
-
+    // Backend returns a JSON {success:false,error} body on 4xx - surface the real reason to the UI
     let data: serde_json::Value = response.json()
         .await
         .map_err(|e| format!("Failed to parse add camera response: {}", e))?;
@@ -416,7 +439,7 @@ async fn add_camera(
     Ok(data)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn test_camera(
     state: State<'_, AppState>,
     camera_id: String,
@@ -467,7 +490,7 @@ async fn test_camera(
     Ok(data)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn remove_camera(
     state: State<'_, AppState>,
     camera_id: String
@@ -512,7 +535,7 @@ fn setup_real_time_data_stream(app_handle: AppHandle, state: Arc<AppState>) {
     });
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
@@ -560,6 +583,16 @@ pub fn run() {
             get_system_status,
             get_system_metrics
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state = app_handle.state::<AppState>();
+                let taken = state.python_process.lock().unwrap().take();
+                if let Some(mut child) = taken {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        });
 }

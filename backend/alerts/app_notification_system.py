@@ -17,6 +17,11 @@ from queue import Queue, Empty
 import sqlite3
 import base64
 
+try:
+    from .. import paths
+except ImportError:
+    import paths
+
 @dataclass
 class AlertMessage:
     """Alert message structure"""
@@ -77,7 +82,7 @@ class AlertDatabase:
     """Local alert storage and management"""
     
     def __init__(self, db_path: str):
-        self.db_path = Path(db_path)
+        self.db_path = paths.resolve(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
         self._init_database()
@@ -88,7 +93,7 @@ class AlertDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 # Main alerts table
                 conn.execute("""
-                    CREATE TABLE IF NOT EXISTS alerts (
+                    CREATE TABLE IF NOT EXISTS app_alerts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         alert_id TEXT UNIQUE NOT NULL,
                         alert_type TEXT NOT NULL,
@@ -107,10 +112,10 @@ class AlertDatabase:
                 """)
                 
                 # Indexes for performance
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp DESC)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_camera ON alerts(camera_id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged ON alerts(acknowledged)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_app_alerts_timestamp ON app_alerts(timestamp DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_app_alerts_type ON app_alerts(alert_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_app_alerts_camera ON app_alerts(camera_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_app_alerts_acknowledged ON app_alerts(acknowledged)")
                 
                 # Alert statistics table
                 conn.execute("""
@@ -133,7 +138,7 @@ class AlertDatabase:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
-                    INSERT INTO alerts (
+                    INSERT INTO app_alerts (
                         alert_id, alert_type, camera_id, message, confidence,
                         timestamp, location, frame_path, acknowledged,
                         acknowledged_by, acknowledged_at, data
@@ -180,7 +185,7 @@ class AlertDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute("""
-                    SELECT data FROM alerts 
+                    SELECT data FROM app_alerts 
                     WHERE timestamp > ? 
                     ORDER BY timestamp DESC 
                     LIMIT ?
@@ -205,7 +210,7 @@ class AlertDatabase:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
-                    UPDATE alerts 
+                    UPDATE app_alerts 
                     SET acknowledged = TRUE,
                         acknowledged_by = ?,
                         acknowledged_at = CURRENT_TIMESTAMP
@@ -227,7 +232,7 @@ class AlertDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute("""
                     SELECT alert_type, COUNT(*) as count
-                    FROM alerts
+                    FROM app_alerts
                     WHERE acknowledged = FALSE
                     GROUP BY alert_type
                 """)
@@ -250,14 +255,14 @@ class AlertDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 # Get frame paths to delete
                 cursor = conn.execute("""
-                    SELECT frame_path FROM alerts 
+                    SELECT frame_path FROM app_alerts 
                     WHERE timestamp < ? AND frame_path IS NOT NULL
                 """, (cutoff_date,))
                 
                 frame_paths = [row[0] for row in cursor.fetchall()]
                 
                 # Delete old alerts
-                conn.execute("DELETE FROM alerts WHERE timestamp < ?", (cutoff_date,))
+                conn.execute("DELETE FROM app_alerts WHERE timestamp < ?", (cutoff_date,))
                 
                 # Cleanup old stats
                 old_day_key = (datetime.now() - timedelta(days=retention_days + 1)).strftime('%Y-%m-%d')
@@ -298,6 +303,7 @@ class AppNotificationManager:
         self.processor_thread: Optional[threading.Thread] = None
         
         # Create alert frames directory
+        self.config.alert_frames_dir = str(paths.resolve(self.config.alert_frames_dir))
         Path(self.config.alert_frames_dir).mkdir(parents=True, exist_ok=True)
         
         # Start processing
@@ -485,7 +491,7 @@ class AppNotificationManager:
                     'today': today_stats,
                     'last_7_days': week_stats,
                     'unacknowledged': unacknowledged,
-                    'total_stored': conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+                    'total_stored': conn.execute("SELECT COUNT(*) FROM app_alerts").fetchone()[0]
                 }
                 
         except Exception as e:

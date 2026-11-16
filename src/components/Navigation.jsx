@@ -21,13 +21,14 @@ const StatusItem = ({ label, status, value }) => {
     active: 'success', 
     ready: 'success',
     optimal: 'success',
-    offline: 'gray',
+    offline: 'error',
+    unknown: 'gray',
     starting: 'accent',
     warning: 'warning',
     critical: 'error'
   };
   
-  const color = statusColors[status?.toLowerCase()] || 'success'; // Default to success instead of gray
+  const color = statusColors[status?.toLowerCase()] || 'gray'; // unknown is never shown as healthy
   
   return (
     <div className="flex justify-between items-center">
@@ -98,18 +99,18 @@ const Navigation = ({ currentView, onViewChange, systemStatus }) => {
         <div className="space-y-3">
           <StatusItem 
             label="Detection Engine" 
-            status={systemStatus?.detectionEngine || 'online'}
-            value={systemStatus?.detectionEngine === 'online' ? 'ACTIVE' : 'READY'}
+            status={systemStatus?.detectionEngine || 'unknown'}
+            value={(systemStatus?.detectionEngine || 'unknown').toUpperCase().replace('ONLINE', 'ACTIVE')}
           />
           <StatusItem 
             label="Camera Grid" 
-            status={systemStatus?.cameraNetwork || 'online'}
-            value={`${systemStatus?.cameras || 0}/${systemStatus?.totalCameras || systemStatus?.cameras || 0} READY`}
+            status={systemStatus?.backendRunning ? (systemStatus?.cameraNetwork || 'unknown') : 'offline'}
+            value={systemStatus?.backendRunning ? `${systemStatus?.cameras || 0} STREAMING` : 'OFFLINE'}
           />
           <StatusItem 
             label="Alert System" 
-            status={systemStatus?.alertSystem || 'ready'}
-            value={systemStatus?.alertSystem === 'ready' ? 'READY' : 'READY'}
+            status={systemStatus?.alertSystem || 'unknown'}
+            value={(systemStatus?.alertSystem || 'unknown').toUpperCase()}
           />
         </div>
       </div>

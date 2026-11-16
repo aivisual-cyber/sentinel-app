@@ -7,8 +7,9 @@ services:
     restart: unless-stopped
     network_mode: "host"
     volumes:
-      - ./config:/app/config:ro
-      - ./logs:/var/log/sentinel
+      - ./config:/app/config        # writable: cameras/threshold changes are saved here
+      - ./data:/app/data
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO

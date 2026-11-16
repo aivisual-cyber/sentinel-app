@@ -1,6 +1,8 @@
 import { toast } from 'react-hot-toast';
 
-export const useNotifications = () => {
+// Built once: toast helpers are stateless, and a stable identity keeps dependent
+// hooks/effects from re-running on every render.
+const buildNotifications = () => {
   const showSuccess = (message, options = {}) => {
     return toast.success(message, {
       ...options,
@@ -117,3 +119,7 @@ export const useNotifications = () => {
 };
 
 export default useNotifications;
+
+const NOTIFICATIONS = buildNotifications();
+
+export const useNotifications = () => NOTIFICATIONS;

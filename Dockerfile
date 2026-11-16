@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-dev \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     ffmpeg \
     curl \
@@ -28,12 +28,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ backend/
 COPY config/ config/
 COPY scripts/ scripts/
-COPY run_sentinel.py .
+COPY run_sentinel.py rabahdev_best.pt ./
+
+ENV SENTINEL_HOME=/app SENTINEL_PORT=8765
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" || exit 1
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health')" || exit 1
 
-EXPOSE 8000
+EXPOSE 8765
 
 CMD ["python3", "run_sentinel.py"]

@@ -223,7 +223,7 @@ const CameraFeed = ({ camera, frame, onRefresh, onRemove, delay = 0 }) => {
             </div>
             
             <div className="relative bg-black">
-              {hasFrame ? (
+              {hasValidFrame ? (
                 <img 
                   src={frame.url} 
                   alt={`Camera ${camera.id} expanded view`}

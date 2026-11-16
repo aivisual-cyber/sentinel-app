@@ -133,26 +133,19 @@ class TestFireDetector:
         assert fire_detector._determine_alert_level(0.65) == 'None'
     
     def test_fire_class_detection(self, fire_detector):
-        """Test fire-related class detection"""
-        # Test direct fire classes
-        assert fire_detector._is_fire_related('fire', 0.8) == True
-        assert fire_detector._is_fire_related('smoke', 0.8) == True
-        assert fire_detector._is_fire_related('flame', 0.8) == True
-        
-        # Test fire keywords
-        assert fire_detector._is_fire_related('house_fire', 0.8) == True
-        assert fire_detector._is_fire_related('smoke_detector', 0.8) == True
-        
-        # Test non-fire classes
-        assert fire_detector._is_fire_related('person', 0.8) == False
-        assert fire_detector._is_fire_related('car', 0.8) == False
-        
-        # Test high confidence potential fire indicators
-        assert fire_detector._is_fire_related('car', 0.95) == True  # Very high confidence
-        
-        # Test below threshold
-        assert fire_detector._is_fire_related('fire', 0.5) == False  # Below log_only threshold
-    
+        """Only configured fire/smoke class names count - exact, case-insensitive."""
+        assert fire_detector._is_fire_related('fire', 0.8)
+        assert fire_detector._is_fire_related('Smoke', 0.8)
+        assert fire_detector._is_fire_related('flame', 0.8)
+        # Substring matches used to count: a 'smoke_detector' is not smoke
+        assert not fire_detector._is_fire_related('smoke_detector', 0.8)
+        assert not fire_detector._is_fire_related('house_fire', 0.8)
+        # COCO objects are never fire, whatever the confidence (was: car@0.95 -> fire)
+        assert not fire_detector._is_fire_related('person', 0.99)
+        assert not fire_detector._is_fire_related('car', 0.99)
+        # Below log_only threshold
+        assert not fire_detector._is_fire_related('fire', 0.5)
+
     def test_detection_latency(self, fire_detector, test_frame):
         """Test detection meets latency requirements"""
         start_time = time.time()

@@ -1,7 +1,3 @@
-// Updated: 2025-09-20
-// Updated: 2025-09-20
-// Updated: 2025-09-20
-// Updated: 2025-09-20
 import React, { useMemo } from 'react';
 import { motion } from 'framer-motion';
 import MetricCard from '../shared/MetricCard';
@@ -15,11 +11,14 @@ const CommandCenter = ({ alerts, systemStatus, isVisible, connectionStatus }) =>
     [alerts]
   );
 
+  const detectionOnline = !!systemStatus?.backendRunning;
+
   const threatLevel = useMemo(() => {
+    if (!detectionOnline) return { level: 'UNKNOWN', color: 'emergency', description: 'Detection offline - NOT monitoring' };
     if (activeAlertsCount === 0) return { level: 'LOW', color: 'safety', description: 'No active threats detected' };
     if (activeAlertsCount < 3) return { level: 'MEDIUM', color: 'warning', description: 'Monitoring active alerts' };
     return { level: 'HIGH', color: 'emergency', description: 'Multiple threats detected' };
-  }, [activeAlertsCount]);
+  }, [activeAlertsCount, detectionOnline]);
 
   const metrics = [
     {
@@ -33,21 +32,21 @@ const CommandCenter = ({ alerts, systemStatus, isVisible, connectionStatus }) =>
       title: 'ACTIVE CAMERAS',
       value: systemStatus.cameras,
       color: 'fire',
-      description: 'All systems operational',
+      description: detectionOnline ? `${systemStatus.cameras} streaming` : 'Detection offline',
       indicator: true
     },
     {
-      title: 'ALERTS TODAY',
+      title: 'ACTIVE ALERTS',
       value: activeAlertsCount,
       color: 'warning',
-      description: 'Last 24 hours',
+      description: 'Unacknowledged, last 24 h',
       indicator: true
     },
     {
-      title: 'SYSTEM UPTIME',
-      value: `${systemStatus.uptime}%`,
-      color: 'safety',
-      description: 'Operational excellence',
+      title: 'DETECTION',
+      value: detectionOnline ? 'ONLINE' : 'OFFLINE',
+      color: detectionOnline ? 'safety' : 'emergency',
+      description: detectionOnline ? 'Backend health check passing' : 'NOT monitoring - start the backend',
       indicator: true
     }
   ];

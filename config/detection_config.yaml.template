@@ -1,0 +1,46 @@
+# Sentinel Fire Detection - Detection Configuration
+# SUPPLEMENTARY early warning only. Never a replacement for certified fire alarm systems.
+
+detection:
+  model:
+    path: rabahdev_best.pt          # relative to SENTINEL_HOME (repo root) or absolute
+    classes: [fire, smoke, flame]   # model class names that count as fire/smoke (case-insensitive)
+    imgsz: 640
+
+  # Calibrated for rabahdev_best.pt on 268 real fire images vs 130 everyday negatives
+  # (docs/ANALYSIS_AND_PLAN.md §4/§9). The old 0.95/0.85/0.70 values could never fire.
+  thresholds:
+    immediate_alert: 0.75    # P1 - single-frame false-alarm rate measured 0.8 %
+    review_queue: 0.55       # P2 - human verification
+    log_only: 0.35           # P4 - data collection (single-frame recall 79 %)
+
+  # A level is raised only if it appears in >= min_hits of the last `window` analysed frames
+  temporal:
+    window: 5
+    min_hits: 3
+
+  environmental:              # NOT IMPLEMENTED yet - kept for future use
+    fog_adjustment: -0.05
+    sunset_hours: [17, 19]
+
+  adaptive:                   # NOT IMPLEMENTED yet
+    enabled: false
+    learning_window_days: 7
+    max_auto_adjustment: 0.05
+
+cameras:
+  max_concurrent: 10
+  rtsp_timeout: 5
+  frame_rate: 2               # analysed frames per second, per camera
+
+system:
+  detection_latency_target: 2.0
+  log_retention_days: 30
+  video_retention_hours: 48
+
+alerts:
+  enabled: true
+  cooldown_seconds: 60        # one alert per camera per window unless the level escalates
+  sms_enabled: false          # not implemented
+  email_enabled: false        # not implemented
+  desktop_notifications: true

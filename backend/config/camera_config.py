@@ -2,11 +2,9 @@
 Camera Configuration Management
 Handles RTSP camera setup, ONVIF discovery, and configuration persistence
 """
-    # Performance optimization - 2025-09-20
 
 import yaml
 import json
-    # Performance optimization - 2025-09-20
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -16,7 +14,13 @@ import ipaddress
 import socket
 import threading
 import time
-    # Performance optimization - 2025-09-20
+import os
+import tempfile
+
+try:
+    from .. import paths
+except ImportError:
+    import paths
 
 @dataclass
 class CameraProfile:
@@ -27,7 +31,7 @@ class CameraProfile:
     username: Optional[str] = None
     password: Optional[str] = None
     fps: int = 15
-    resolution: Tuple[int, int] = (1920, 1080)
+    resolution: Optional[List[int]] = None  # informational; actual resolution is read from the stream
     enabled: bool = True
     location: str = ""
     detection_zones: List[List[Tuple[int, int]]] = None
@@ -35,6 +39,25 @@ class CameraProfile:
     def __post_init__(self):
         if self.detection_zones is None:
             self.detection_zones = []
+        if self.resolution is not None:
+            self.resolution = [int(v) for v in self.resolution]  # never a tuple (safe_load can't read !!python/tuple)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'CameraProfile':
+        """Accept the current schema and the legacy one (id/url/fps_limit) used by older files."""
+        d = dict(data)
+        if 'camera_id' not in d and 'id' in d:
+            d['camera_id'] = d.pop('id')
+        if 'rtsp_url' not in d and 'url' in d:
+            d['rtsp_url'] = d.pop('url')
+        if 'fps' not in d and 'fps_limit' in d:
+            d['fps'] = d.pop('fps_limit')
+        d.setdefault('name', f"Camera {d.get('camera_id')}")
+        for k in ('username', 'password'):
+            if d.get(k) == '':
+                d[k] = None
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 @dataclass
 class NetworkScan:
@@ -47,8 +70,8 @@ class NetworkScan:
 class CameraConfigManager:
     """Manages camera configurations and discovery"""
     
-    def __init__(self, config_file: str = "config/cameras.yaml"):
-        self.config_file = Path(config_file)
+    def __init__(self, config_file: str = None):
+        self.config_file = paths.resolve(config_file) if config_file else paths.CAMERAS_CONFIG
         self.logger = logging.getLogger(__name__)
         self.cameras: Dict[str, CameraProfile] = {}
         self.discovered_devices: List[Dict] = []
@@ -60,11 +83,13 @@ class CameraConfigManager:
             if self.config_file.exists():
                 with open(self.config_file, 'r') as f:
                     data = yaml.safe_load(f)
-                    if data and 'cameras' in data:
-                        for cam_data in data['cameras']:
-                            profile = CameraProfile(**cam_data)
-                            self.cameras[profile.camera_id] = profile
-                        self.logger.info(f"Loaded {len(self.cameras)} camera configurations")
+                for cam_data in (data or {}).get('cameras') or []:
+                    try:
+                        profile = CameraProfile.from_dict(cam_data)
+                        self.cameras[profile.camera_id] = profile
+                    except Exception as e:  # one bad entry must not drop every camera
+                        self.logger.error(f"Skipping invalid camera entry {cam_data!r}: {e}")
+                self.logger.info(f"Loaded {len(self.cameras)} camera configurations")
             else:
                 self.logger.info("No camera config file found, starting with empty configuration")
         except Exception as e:
@@ -82,8 +107,12 @@ class CameraConfigManager:
                 'last_updated': datetime.now().isoformat()
             }
             
-            with open(self.config_file, 'w') as f:
-                yaml.dump(config_data, f, default_flow_style=False, indent=2)
+            # Atomic write, owner-only permissions (file may contain camera passwords)
+            fd, tmp = tempfile.mkstemp(dir=str(self.config_file.parent), prefix='.cameras.')
+            with os.fdopen(fd, 'w') as f:
+                yaml.safe_dump(config_data, f, default_flow_style=False, indent=2, sort_keys=False)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.config_file)
             
             self.logger.info(f"Saved {len(self.cameras)} camera configurations")
         except Exception as e:
@@ -226,8 +255,8 @@ class CameraConfigManager:
         """Test if RTSP stream is accessible"""
         try:
             import cv2
-            cap = cv2.VideoCapture(rtsp_url)
-            cap.set(cv2.CAP_PROP_TIMEOUT, timeout * 1000)  # OpenCV timeout in milliseconds
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout * 1000,
+                                                         cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout * 1000])
             
             if cap.isOpened():
                 ret, frame = cap.read()
@@ -262,12 +291,13 @@ class CameraConfigManager:
                 # Insert credentials into URL
                 from urllib.parse import urlparse, urlunparse
                 parsed = urlparse(url)
-                netloc = f"{profile.username}:{profile.password}@{parsed.netloc}"
+                from urllib.parse import quote
+                netloc = f"{quote(profile.username, safe='')}:{quote(profile.password, safe='')}@{parsed.netloc}"
                 url = urlunparse((parsed.scheme, netloc, parsed.path, 
                                 parsed.params, parsed.query, parsed.fragment))
             
-            cap = cv2.VideoCapture(url)
-            cap.set(cv2.CAP_PROP_TIMEOUT, 10000)  # 10 second timeout
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000,
+                                                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000])
             
             if cap.isOpened():
                 ret, frame = cap.read()
@@ -305,7 +335,7 @@ class CameraConfigManager:
             }
             
             with open(export_path, 'w') as f:
-                yaml.dump(export_data, f, default_flow_style=False, indent=2)
+                yaml.safe_dump(export_data, f, default_flow_style=False, indent=2)
             
             self.logger.info(f"Exported configuration to {export_path}")
             return export_path
@@ -325,7 +355,7 @@ class CameraConfigManager:
             imported_count = 0
             for cam_data in data.get('cameras', []):
                 try:
-                    profile = CameraProfile(**cam_data)
+                    profile = CameraProfile.from_dict(cam_data)
                     self.cameras[profile.camera_id] = profile
                     imported_count += 1
                 except Exception as e:
@@ -417,4 +447,4 @@ if __name__ == "__main__":
 
 
 
-# Refactored for stability and edge performance
+

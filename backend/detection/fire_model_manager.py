@@ -11,6 +11,47 @@ from typing import Optional, Tuple
 import torch
 from ultralytics import YOLO
 import hashlib
+import builtins
+import importlib
+import pickle
+import re
+
+_ALLOWED_GLOBAL_ROOTS = ('torch', 'ultralytics', 'collections')
+
+
+def safe_load_checkpoint(model_path) -> dict:
+    """Load an Ultralytics checkpoint with ``weights_only=True``.
+
+    Only classes from torch/ultralytics/collections are allow-listed, so a malicious
+    pickle cannot execute code. (PyTorch >= 2.6 defaults to weights_only=True, which
+    made the old ``torch.load(path)`` verification fail and delete the model file.)
+    """
+    allow = [builtins.set, builtins.getattr]
+    for _ in range(100):
+        try:
+            with torch.serialization.safe_globals(allow):
+                return torch.load(model_path, map_location='cpu', weights_only=True)
+        except pickle.UnpicklingError as e:
+            match = re.search(r'Unsupported global: GLOBAL ([\w\.]+)', str(e))
+            if not match:
+                raise
+            name = match.group(1)
+            if name.split('.')[0] not in _ALLOWED_GLOBAL_ROOTS:
+                raise ValueError(f"Refusing checkpoint {model_path}: requires untrusted global '{name}'")
+            module, attr = name.rsplit('.', 1)
+            allow.append(getattr(importlib.import_module(module), attr))
+    raise ValueError(f"Checkpoint {model_path} requires too many globals")
+
+
+def safe_load_yolo(model_path) -> YOLO:
+    """Build a YOLO object from a checkpoint loaded with :func:`safe_load_checkpoint`."""
+    ckpt = safe_load_checkpoint(model_path)
+    net = (ckpt.get('ema') or ckpt['model']).float().eval()
+    yolo = YOLO('yolov8n.yaml', task='detect')  # skeleton only; weights replaced below
+    yolo.model = net
+    yolo.ckpt_path = str(model_path)
+    return yolo
+
 
 class FireModelManager:
     """Manages fire detection models with automatic downloading"""
@@ -48,21 +89,20 @@ class FireModelManager:
         # Fire-specific classes we'll retrain for
         self.fire_classes = ['fire', 'smoke']
         
-    def download_model(self, model_name: str = 'fire_yolov8n') -> str:
-        """Download a fire detection model"""
+    def download_model(self, model_name: str = 'yolov8n_base') -> str:
+        """Download a BASE (COCO, not fire-trained) model. Never used at runtime by FireDetector."""
         if model_name not in self.available_models:
             raise ValueError(f"Unknown model: {model_name}. Available: {list(self.available_models.keys())}")
         
         model_info = self.available_models[model_name]
         model_path = self.models_dir / f"{model_name}.pt"
         
-        # Check if already downloaded and valid
+        # Check if already downloaded and valid. Never delete a local model the user placed.
         if model_path.exists():
             if self._verify_model(model_path, model_info.get('sha256')):
                 self.logger.info(f"Model {model_name} already exists and verified")
                 return str(model_path)
-            else:
-                self.logger.warning(f"Model {model_name} exists but verification failed, re-downloading")
+            raise RuntimeError(f"Local model {model_path} failed verification; refusing to overwrite it")
         
         # Download model
         self.logger.info(f"Downloading {model_name} ({model_info['size']})...")
@@ -89,9 +129,9 @@ class FireModelManager:
     def _verify_model(self, model_path: Path, expected_sha256: Optional[str] = None) -> bool:
         """Verify model file integrity"""
         try:
-            # Check if file is a valid PyTorch model
-            torch.load(model_path, map_location='cpu')
-            
+            # Check the file is a loadable checkpoint without executing arbitrary pickle code
+            safe_load_checkpoint(model_path)
+
             # Check file size (should be reasonable)
             size_mb = model_path.stat().st_size / (1024 * 1024)
             if size_mb < 1 or size_mb > 1000:  # 1MB to 1GB range

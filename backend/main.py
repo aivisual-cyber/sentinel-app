@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Sentinel Fire Detection System - Main Application
-Coordinates detection engine, video processing, and alert management
+Coordinates detection engine, camera streams, and alert management.
+
+SUPPLEMENTARY early-warning only - never a replacement for certified fire alarm systems.
 """
 
 import asyncio
@@ -9,267 +11,229 @@ import logging
 import signal
 import sys
 import time
+from collections import deque
 from pathlib import Path
-from typing import Dict, Any
-import threading
+from typing import Any, Dict
 
-# Add backend to path
-sys.path.append(str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from detection.fire_detector import FireDetector
-from config.config_manager import config_manager
-from alerts.alert_manager import get_alert_manager
-from utils.video_simulator import StreamProcessor
+import paths  # noqa: E402
+from detection.fire_detector import FireDetector, DetectionResult  # noqa: E402
+from config.config_manager import config_manager  # noqa: E402
+from alerts.alert_manager import get_alert_manager, LEVEL_RANK  # noqa: E402
+from utils.video_simulator import StreamProcessor  # noqa: E402
 
-class SentinelSystem:
-    """Main Sentinel Fire Detection System"""
-    
-    def __init__(self):
-        self.logger = self._setup_logging()
-        self.config_manager = config_manager
-        self.alert_manager = get_alert_manager()
-        self.fire_detector = None
-        self.stream_processor = None
-        self.is_running = False
-        
-        self.logger.info("Sentinel System initialized")
-    
-    def _setup_logging(self) -> logging.Logger:
-        """Configure system logging"""
+RANK_LEVEL = {v: k for k, v in LEVEL_RANK.items()}
+
+
+class TemporalConfirmer:
+    """A level is confirmed only if >= min_hits of the last `window` analysed frames reached it.
+
+    Single-frame detectors produce sporadic false positives (measured 5-12 % of everyday
+    images at usable thresholds); requiring persistence across frames suppresses most of
+    them at a cost of (min_hits / process_fps) seconds of latency.
+    """
+
+    def __init__(self, window: int = 5, min_hits: int = 3):
+        self.window, self.min_hits = max(1, window), max(1, min(min_hits, window))
+        self._hist: Dict[str, deque] = {}
+
+    def update(self, camera_id: str, level: str) -> str:
+        h = self._hist.setdefault(camera_id, deque(maxlen=self.window))
+        if h.maxlen != self.window:
+            h = self._hist[camera_id] = deque(h, maxlen=self.window)
+        h.append(LEVEL_RANK.get(level, 0))
+        for rank in (3, 2, 1):
+            if sum(r >= rank for r in h) >= self.min_hits:
+                return RANK_LEVEL[rank]
+        return 'None'
+
+    def forget(self, camera_id: str) -> None:
+        self._hist.pop(camera_id, None)
+
+
+def setup_logging() -> logging.Logger:
+    paths.LOG_DIR.mkdir(parents=True, exist_ok=True)  # must exist before the FileHandler
+    root = logging.getLogger()
+    if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler('logs/sentinel.log', mode='a')
-            ]
+            handlers=[logging.StreamHandler(), logging.FileHandler(paths.LOG_DIR / 'sentinel.log', mode='a')],
+            force=True,
         )
-        
-        # Create logs directory if it doesn't exist
-        Path('logs').mkdir(exist_ok=True)
-        
-        return logging.getLogger(__name__)
-    
-    async def start(self):
-        """Start the Sentinel system"""
+    return logging.getLogger(__name__)
+
+
+class SentinelSystem:
+    """Main Sentinel Fire Detection System"""
+
+    def __init__(self):
+        paths.ensure_dirs()
+        self.logger = setup_logging()
+        self.config_manager = config_manager
+        alert_cfg = self.config_manager.get_alert_config()
+        self.alert_manager = get_alert_manager()
+        self.alert_manager.cooldown_seconds = alert_cfg.cooldown_seconds
+        self.fire_detector = None
+        self.stream_processor = None
+        self.confirmer = None
+        self.is_running = False
+        self.start_time = time.time()
+        self.frames_processed = 0
+        self.detections_made = 0
+        self.last_detection_error = None
+        self.logger.info("Sentinel System initialized")
+
+    async def start(self, install_signals: bool = True):
         try:
             self.logger.info("Starting Sentinel Fire Detection System")
-            
-            # Initialize components
-            await self._initialize_components()
-            
-            # Setup signal handlers for graceful shutdown
-            signal.signal(signal.SIGINT, self._signal_handler)
-            signal.signal(signal.SIGTERM, self._signal_handler)
-            
-            # Start main processing loop
+            self._initialize_components()
+            if install_signals:
+                try:
+                    signal.signal(signal.SIGINT, self._signal_handler)
+                    signal.signal(signal.SIGTERM, self._signal_handler)
+                except ValueError:
+                    pass  # not in main thread
             self.is_running = True
             await self._main_loop()
-            
         except Exception as e:
-            self.logger.error(f"Failed to start Sentinel system: {e}")
+            self.logger.critical(f"Failed to start Sentinel system: {e}")
+            self.is_running = False
             raise
-    
-    async def _initialize_components(self):
-        """Initialize all system components"""
-        # Load configuration
-        detection_config = self.config_manager.get_detection_config()
-        system_config = self.config_manager.get_system_config()
-        
-        self.logger.info(f"Detection thresholds: P1={detection_config.immediate_alert}, "
-                        f"P2={detection_config.review_queue}, P4={detection_config.log_only}")
-        
-        # Initialize fire detector
-        self.fire_detector = FireDetector()
-        self.logger.info("Fire detector initialized")
-        
-        # Initialize stream processor with detection callback
-        self.stream_processor = StreamProcessor(self._detection_callback)
-        # Note: Cameras should be added via configuration or discovery
-        self.logger.info("Video stream processor initialized")
-        
-        # Start stream processing
+
+    def _initialize_components(self):
+        det = self.config_manager.get_detection_config()
+        system = self.config_manager.get_system_config()
+        self.logger.info(f"Detection thresholds: P1={det.immediate_alert}, P2={det.review_queue}, "
+                         f"P4={det.log_only}; temporal {det.temporal_min_hits}/{det.temporal_window}")
+
+        self.fire_detector = FireDetector(str(self.config_manager.config_path))
+        self.confirmer = TemporalConfirmer(det.temporal_window, det.temporal_min_hits)
+        self.stream_processor = StreamProcessor(self._detection_callback, process_fps=system.frame_rate)
         self.stream_processor.start_processing()
-        self.logger.info("Camera stream processing started")
-    
+        self.logger.info(f"Camera stream processing started at {system.frame_rate} FPS per camera")
+
     def _detection_callback(self, frames: Dict[str, Any]):
-        """Process detection results from camera frames"""
         for camera_id, frame in frames.items():
             try:
-                # Run fire detection on frame
-                detection_result = self.fire_detector.detect_fire(frame)
-                
-                # Create alert if detection found
-                if detection_result.alert_level != 'None':
-                    alert = self.alert_manager.create_alert(camera_id, detection_result)
-                    if alert:
-                        # Save the frame with bounding boxes
-                        frame_path = self.fire_detector._save_alert_frame(
-                            frame, 
-                            detection_result.detections, 
-                            alert.id
-                        )
-                        
-                        # Update alert with frame path
-                        if frame_path:
-                            alert.frame_path = frame_path
-                            # Re-save alert with frame path
-                            self.alert_manager.database.save_alert(alert)
-                        
-                        self.logger.info(f"Alert created: {alert.id} ({alert.alert_level.value}) "
-                                       f"Camera: {camera_id} Confidence: {alert.confidence:.2f}")
-                
+                result: DetectionResult = self.fire_detector.detect_fire(frame)
+                self.frames_processed += 1
+                det = self.config_manager.get_detection_config()
+                self.confirmer.window, self.confirmer.min_hits = det.temporal_window, det.temporal_min_hits
+                confirmed = self.confirmer.update(camera_id, result.alert_level)
+                if confirmed == 'None':
+                    continue
+                self.detections_made += 1
+                result.alert_level = confirmed
+                alert = self.alert_manager.create_alert(camera_id, result)
+                if alert:  # None when suppressed by the per-camera cooldown
+                    frame_path = self.fire_detector.save_alert_frame(frame, result.detections, alert.id)
+                    if frame_path:
+                        self.alert_manager.attach_frame(alert, frame_path)
+                    self.logger.warning(f"Alert {alert.id} ({alert.alert_level.value}) camera={camera_id} "
+                                        f"confidence={alert.confidence:.2f}")
+                self.last_detection_error = None
             except Exception as e:
+                self.last_detection_error = str(e)
                 self.logger.error(f"Detection error for camera {camera_id}: {e}")
-    
+
     async def _main_loop(self):
-        """Main system processing loop"""
         self.logger.info("Sentinel system running - monitoring cameras for fire detection")
-        
-        # Performance monitoring
-        last_stats_time = time.time()
-        
+        last_stats = time.time()
+        last_cleanup = 0.0
         while self.is_running:
             try:
-                # Periodic system health checks
-                current_time = time.time()
-                
-                # Log system statistics every 60 seconds
-                if current_time - last_stats_time >= 60:
-                    await self._log_system_stats()
-                    last_stats_time = current_time
-                
-                # Check for configuration updates
+                now = time.time()
+                if now - last_stats >= 60:
+                    self._log_system_stats()
+                    last_stats = now
+                if now - last_cleanup >= 3600:
+                    retention = self.config_manager.get_system_config().log_retention_days
+                    self.alert_manager.database.cleanup_old_records(retention, frames_dir=paths.ALERT_FRAMES_DIR)
+                    last_cleanup = now
                 if self.config_manager.reload_config():
                     self.logger.info("Configuration reloaded")
-                
-                # Sleep briefly to prevent busy waiting
                 await asyncio.sleep(1)
-                
             except Exception as e:
                 self.logger.error(f"Error in main loop: {e}")
-                await asyncio.sleep(5)  # Wait before retrying
-    
-    async def _log_system_stats(self):
-        """Log system performance statistics"""
+                await asyncio.sleep(5)
+
+    def _log_system_stats(self):
         try:
-            # Get camera status
-            camera_status = self.stream_processor.get_camera_status()
-            active_cameras = len([c for c in camera_status.values() if c['running']])
-            
-            # Get alert statistics
-            dashboard_data = self.alert_manager.get_dashboard_data()
-            active_alerts = dashboard_data['system_status']['active_alerts']
-            
-            self.logger.info(f"System Stats - Cameras: {active_cameras}, "
-                           f"Active Alerts: {active_alerts}, "
-                           f"Total Alerts (24h): {len(dashboard_data['recent_alerts'])}")
-            
-            # Log to database for historical tracking
-            self.alert_manager.database.log_system_event(
-                "INFO", "System health check", "SentinelSystem", {
-                    'active_cameras': active_cameras,
-                    'active_alerts': active_alerts,
-                    'uptime_seconds': time.time() - self.start_time
-                }
-            )
-            
+            status = self.stream_processor.get_camera_status()
+            connected = sum(1 for c in status.values() if c['connected'])
+            dashboard = self.alert_manager.get_dashboard_data(len(status))
+            self.logger.info(f"System Stats - Cameras: {connected}/{len(status)}, "
+                             f"Active Alerts: {dashboard['system_status']['active_alerts']}, "
+                             f"Frames analysed: {self.frames_processed}")
+            self.alert_manager.database.log_system_event("INFO", "System health check", "SentinelSystem", {
+                'connected_cameras': connected, 'total_cameras': len(status),
+                'frames_processed': self.frames_processed, 'uptime_seconds': time.time() - self.start_time})
         except Exception as e:
             self.logger.error(f"Failed to log system stats: {e}")
-    
+
+    def get_status(self) -> Dict[str, Any]:
+        cams = self.stream_processor.get_camera_status() if self.stream_processor else {}
+        return {
+            'running': self.is_running,
+            'detector_loaded': self.fire_detector is not None,
+            'model': getattr(getattr(self.fire_detector, 'model', None), 'ckpt_path', None),
+            'active_cameras': sum(1 for c in cams.values() if c['connected']),
+            'total_cameras': len(cams),
+            'uptime': (time.time() - self.start_time) / 3600,
+            'frames_processed': self.frames_processed,
+            'detections_made': self.detections_made,
+            'last_detection_error': self.last_detection_error,
+        }
+
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals"""
         self.logger.info(f"Received signal {signum}, initiating shutdown...")
         self.is_running = False
-    
+
     async def stop(self):
-        """Stop the Sentinel system gracefully"""
         self.logger.info("Stopping Sentinel Fire Detection System")
-        
         self.is_running = False
-        
-        # Stop components
         if self.stream_processor:
             self.stream_processor.stop_processing()
-        
         if self.alert_manager:
             self.alert_manager.stop()
-        
         self.logger.info("Sentinel system stopped")
 
+
 class APIServer:
-    """Simple API server for Tauri frontend communication"""
-    
+    """Thin adapter used by api_server.py"""
+
     def __init__(self, sentinel_system: SentinelSystem):
         self.sentinel = sentinel_system
         self.logger = logging.getLogger(__name__)
-    
+
     def get_dashboard_data(self) -> Dict[str, Any]:
-        """Get dashboard data for frontend"""
-        try:
-            # Get camera count from stream processor
-            camera_count = 0
-            if self.sentinel.stream_processor:
-                camera_status = self.sentinel.stream_processor.get_camera_status()
-                camera_count = len(camera_status)
-            
-            dashboard_data = self.sentinel.alert_manager.get_dashboard_data(camera_count)
-            config_summary = self.sentinel.config_manager.get_config_summary()
-            
-            result = {
-                'alerts': dashboard_data,
-                'config': config_summary,
-                'timestamp': time.time()
-            }
-            
-            self.logger.debug(f"Returning dashboard data: {result}")
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get dashboard data: {e}")
-            import traceback
-            self.logger.error(f"Full traceback: {traceback.format_exc()}")
-            return {'error': str(e)}
-    
+        camera_count = len(self.sentinel.stream_processor.get_camera_status()) if self.sentinel.stream_processor else 0
+        return {
+            'alerts': self.sentinel.alert_manager.get_dashboard_data(camera_count),
+            'config': self.sentinel.config_manager.get_config_summary(),
+            'timestamp': time.time(),
+        }
+
     def update_threshold(self, threshold_name: str, value: float) -> bool:
-        """Update detection threshold"""
-        try:
-            return self.sentinel.config_manager.update_threshold(threshold_name, value)
-        except Exception as e:
-            self.logger.error(f"Failed to update threshold {threshold_name}: {e}")
-            return False
-    
+        return self.sentinel.config_manager.update_threshold(threshold_name, value)
+
     def acknowledge_alert(self, alert_id: str) -> bool:
-        """Acknowledge an alert"""
-        try:
-            return self.sentinel.alert_manager.acknowledge_alert(alert_id)
-        except Exception as e:
-            self.logger.error(f"Failed to acknowledge alert {alert_id}: {e}")
-            return False
+        return self.sentinel.alert_manager.acknowledge_alert(alert_id)
+
 
 async def main():
-    """Main entry point"""
-    print("🔥 Starting Sentinel Fire Detection System")
-    print("="*50)
-    
-    # Create main system
+    print("🔥 Starting Sentinel Fire Detection System (headless)")
+    print("⚠️  SUPPLEMENTARY FIRE DETECTION ONLY - NOT A REPLACEMENT FOR CERTIFIED SYSTEMS")
     sentinel = SentinelSystem()
-    sentinel.start_time = time.time()
-    
     try:
         await sentinel.start()
     except KeyboardInterrupt:
-        print("\nShutdown requested by user")
-    except Exception as e:
-        print(f"System error: {e}")
+        pass
     finally:
         await sentinel.stop()
-        print("Sentinel system stopped")
+
 
 if __name__ == "__main__":
-    # Ensure required directories exist
-    for directory in ['logs', 'data', 'test_data', 'models']:
-        Path(directory).mkdir(exist_ok=True)
-    
-    # Run the system
     asyncio.run(main())

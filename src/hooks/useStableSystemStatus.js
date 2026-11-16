@@ -11,12 +11,13 @@ export const useStableSystemStatus = () => {
     cameras: 0,
     totalCameras: 0,
     activeAlerts: 0,
-    uptime: 99,
-    systemHealth: 'optimal', // Start optimistic to prevent initial flash
-    detectionEngine: 'online',
-    cameraNetwork: 'online', 
-    alertSystem: 'ready',
-    backendRunning: true, // Assume backend is running initially
+    uptime: 0,
+    // Safety system: never assume protection is active until the backend proves it
+    systemHealth: 'unknown',
+    detectionEngine: 'unknown',
+    cameraNetwork: 'unknown',
+    alertSystem: 'unknown',
+    backendRunning: false,
     pythonPid: null
   });
 
@@ -64,7 +65,8 @@ export const useStableSystemStatus = () => {
     
     // Only allow health changes after 3 consecutive readings
     // Exception: Always allow optimal → warning/critical for safety
-    if (stability.consecutive >= 3 || 
+    // Degradations (anything -> critical/warning) and the first real reading apply immediately
+    if (stability.consecutive >= 3 || proposedHealth === 'critical' || currentHealth === 'unknown' ||
         (currentHealth === 'optimal' && proposedHealth !== 'optimal')) {
       return proposedHealth;
     }
@@ -92,6 +94,8 @@ export const useStableSystemStatus = () => {
         const hasSignificantChange = 
           current.systemHealth !== newStatus.systemHealth ||
           current.detectionEngine !== newStatus.detectionEngine ||
+          current.backendRunning !== newStatus.backendRunning ||
+          current.alertSystem !== newStatus.alertSystem ||
           Math.abs(current.cameras - newStatus.cameras) > 0 ||
           Math.abs(current.activeAlerts - newStatus.activeAlerts) > 0;
         
@@ -111,16 +115,15 @@ export const useStableSystemStatus = () => {
     if (data && data.alerts) {
       // Update active alerts count
       const activeAlerts = data.alerts.recent_alerts 
-        ? data.alerts.recent_alerts.filter(alert => !alert.acknowledged).length 
+        ? data.alerts.recent_alerts.filter(alert => alert.status === 'active').length
         : 0;
-      
-      const systemHealth = data.alerts.system_status?.health || 'optimal';
-      
+
+      // A dashboard payload proves the detection backend is up
       updateStatusDebounced({
         activeAlerts,
-        systemHealth: mapHealthStatus(systemHealth),
-        detectionEngine: data.alerts.system_status?.detection_engine || 'online',
-        alertSystem: 'online'
+        backendRunning: true,
+        detectionEngine: 'online',
+        alertSystem: 'ready'
       });
 
       // Reset error tracking on successful real-time update
@@ -173,9 +176,13 @@ export const useStableSystemStatus = () => {
       let hasValidData = false;
 
       if (systemData) {
-        updates.backendRunning = systemData.backend_running;
+        updates.backendRunning = !!systemData.backend_running;
         updates.pythonPid = systemData.python_pid;
         updates.uptime = systemData.uptime || 0;
+        // Health comes from the backend's real /api/health probe (via Rust get_system_status)
+        updates.detectionEngine = systemData.backend_running ? 'online' : 'offline';
+        updates.alertSystem = systemData.backend_running ? 'ready' : 'offline';
+        updates.systemHealth = systemData.backend_running ? 'optimal' : 'critical';
         hasValidData = true;
       }
 
@@ -189,13 +196,11 @@ export const useStableSystemStatus = () => {
       // Alert information from dashboard
       if (dashboardData && dashboardData.alerts) {
         updates.activeAlerts = dashboardData.alerts.recent_alerts 
-          ? dashboardData.alerts.recent_alerts.filter(alert => !alert.acknowledged).length 
+          ? dashboardData.alerts.recent_alerts.filter(alert => alert.status === 'active').length
           : 0;
-        
-        const systemHealth = dashboardData.alerts.system_status?.health || 'optimal';
-        updates.systemHealth = mapHealthStatus(systemHealth);
-        updates.detectionEngine = dashboardData.alerts.system_status?.detection_engine || 'online';
-        updates.alertSystem = 'online';
+        if (cameraData && cameraData.total_cameras > 0 && cameraData.active_cameras < cameraData.total_cameras) {
+          updates.systemHealth = updates.systemHealth === 'critical' ? 'critical' : 'warning';
+        }
         hasValidData = true;
       }
 
@@ -203,12 +208,8 @@ export const useStableSystemStatus = () => {
       // If we got ANY valid data, the backend is responding and functional
       if (hasValidData) {
         // Backend is responding, so core systems are online
-        updates.detectionEngine = updates.detectionEngine || 'online';
-        updates.alertSystem = updates.alertSystem || 'ready';
-        
-        // Only override system health if it's not already set by dashboard data
         if (!updates.systemHealth) {
-          updates.systemHealth = 'optimal';
+          updates.systemHealth = 'unknown';
         }
       }
       // Note: We don't set critical here anymore - only sustained API failures can do that
@@ -229,9 +230,11 @@ export const useStableSystemStatus = () => {
         // Don't immediately mark as error, especially during startup
         const timeSinceLastSuccess = Date.now() - lastSuccessRef.current;
         
-        if (timeSinceLastSuccess > 30000) { // Only count as error after 30 seconds
-          console.warn('No backend responses for 30+ seconds, incrementing error count');
+        if (timeSinceLastSuccess > 15000) { // No backend for 15 s: detection is NOT protecting anything
+          console.warn('No backend responses for 15+ seconds - marking detection offline');
           errorCountRef.current += 1;
+          updateStatusDebounced({ systemHealth: 'critical', detectionEngine: 'offline',
+                                  alertSystem: 'offline', backendRunning: false });
         } else {
           console.log('Backend not responding yet, but this is normal during startup');
         }
@@ -245,7 +248,7 @@ export const useStableSystemStatus = () => {
       
       // Very conservative approach to critical status
       // Only mark as critical after sustained, severe failures
-      if (errorCountRef.current >= 10 && timeSinceLastSuccess > 300000) { // 5+ minutes of failures
+      if (errorCountRef.current >= 3 && timeSinceLastSuccess > 15000) { // detection offline
         updateStatusDebounced({
           systemHealth: 'critical',
           detectionEngine: 'offline',
@@ -264,16 +267,24 @@ export const useStableSystemStatus = () => {
     }
   }, [getSystemStatus, getCameraFeeds, getDashboardData, currentStatus, lastUpdateTime]);
 
-  // Periodic status refresh with smart intervals
+  // Always call the latest refresh function without re-running the polling effect.
+  // (Depending on refreshSystemStatus/currentStatus re-fired the effect on every state
+  //  change -> immediate refetch -> state change: an unbounded request loop once real data arrived.)
+  const refreshRef = useRef(refreshSystemStatus);
+  refreshRef.current = refreshSystemStatus;
+  const healthRef = useRef(currentStatus.systemHealth);
+  healthRef.current = currentStatus.systemHealth;
+
+  // Periodic status refresh with smart intervals (mount once)
   useEffect(() => {
     // Initial status check - but give the app time to load first
     const initialDelay = setTimeout(() => {
-      refreshSystemStatus(true);
+      refreshRef.current(true);
     }, 1000); // Wait 1 second before first check
 
     // Adaptive refresh interval based on system health
     const getRefreshInterval = () => {
-      switch (currentStatus.systemHealth) {
+      switch (healthRef.current) {
         case 'critical': return 5000;   // Check every 5s when critical
         case 'warning': return 8000;    // Check every 8s when warning
         case 'optimal': return 20000;   // Check every 20s when optimal (longer for efficiency)
@@ -287,7 +298,7 @@ export const useStableSystemStatus = () => {
       }
       
       intervalRef.current = setTimeout(() => {
-        refreshSystemStatus(false); // Background refresh
+        refreshRef.current(false); // Background refresh
         scheduleNextRefresh();
       }, getRefreshInterval());
     };
@@ -307,7 +318,7 @@ export const useStableSystemStatus = () => {
         clearTimeout(debounceRef.current);
       }
     };
-  }, [refreshSystemStatus, currentStatus.systemHealth]);
+  }, []);
 
   // Manual status update function (for compatibility)
   const updateStatus = useCallback((updates) => {

@@ -15,6 +15,27 @@ from enum import Enum
 import threading
 from queue import Queue
 
+try:
+    from .. import paths
+except ImportError:
+    import paths
+
+
+def _json_default(o):
+    """numpy scalars/arrays and other non-JSON types (bbox values were numpy.int64)."""
+    if hasattr(o, 'item'):
+        return o.item()
+    if hasattr(o, 'tolist'):
+        return o.tolist()
+    return str(o)
+
+
+def to_json(value) -> str:
+    return json.dumps(value, default=_json_default)
+
+
+LEVEL_RANK = {'P4': 1, 'P2': 2, 'P1': 3}
+
 class AlertLevel(Enum):
     P1 = "P1"  # Immediate alert
     P2 = "P2"  # Review queue
@@ -37,7 +58,7 @@ class Alert:
         """Convert to dictionary for serialization"""
         data = asdict(self)
         data['alert_level'] = self.alert_level.value
-        data['detections'] = json.dumps(self.detections)
+        data['detections'] = to_json(self.detections)
         return data
     
     @classmethod
@@ -62,9 +83,9 @@ class Alert:
 class AlertDatabase:
     """SQLite database for storing alerts and system logs"""
     
-    def __init__(self, db_path: str = "data/alerts.db"):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(exist_ok=True)
+    def __init__(self, db_path: str = None):
+        self.db_path = paths.resolve(db_path) if db_path else paths.ALERTS_DB
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
         self._init_database()
     
@@ -87,6 +108,8 @@ class AlertDatabase:
                 )
             """)
             
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(timestamp DESC)")
+
             # System logs table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS system_logs (
@@ -199,17 +222,25 @@ class AlertDatabase:
                     VALUES (?, ?, ?, ?, ?)
                 """, (
                     time.time(), level, message, component,
-                    json.dumps(data) if data else None
+                    to_json(data) if data else None
                 ))
                 conn.commit()
         except Exception as e:
             self.logger.error(f"Failed to log system event: {e}")
     
-    def cleanup_old_records(self, retention_days: int = 30):
-        """Clean up old records"""
+    def cleanup_old_records(self, retention_days: int = 30, frames_dir: Optional[Path] = None):
+        """Clean up old records and their saved frames"""
         cutoff = time.time() - (retention_days * 24 * 3600)
-        
+
         try:
+            if frames_dir and Path(frames_dir).is_dir():
+                removed = 0
+                for f in Path(frames_dir).glob('*.jpg'):
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink(missing_ok=True)
+                        removed += 1
+                if removed:
+                    self.logger.info(f"Removed {removed} alert frames older than {retention_days} days")
             with sqlite3.connect(self.db_path) as conn:
                 # Clean alerts
                 cursor = conn.execute("DELETE FROM alerts WHERE timestamp < ?", (cutoff,))
@@ -233,10 +264,15 @@ class AlertDatabase:
 class AlertManager:
     """Main alert management system"""
     
-    def __init__(self, config_manager=None):
+    def __init__(self, config_manager=None, db_path: str = None, cooldown_seconds: float = 60.0):
         self.config_manager = config_manager
-        self.database = AlertDatabase()
+        self.database = AlertDatabase(db_path)
         self.logger = logging.getLogger(__name__)
+
+        # De-duplication: one alert per camera per cooldown window unless the level escalates
+        self.cooldown_seconds = cooldown_seconds
+        self._last_alert: Dict[str, tuple] = {}  # camera_id -> (timestamp, level_rank)
+        self._dedup_lock = threading.Lock()
         
         # Alert queue for processing
         self.alert_queue = Queue()
@@ -256,16 +292,24 @@ class AlertManager:
         """Create alert from detection result"""
         if detection_result.alert_level == 'None':
             return None
-        
+
+        now = time.time()
+        rank = LEVEL_RANK[detection_result.alert_level]
+        with self._dedup_lock:
+            last = self._last_alert.get(camera_id)
+            if last and now - last[0] < self.cooldown_seconds and rank <= last[1]:
+                return None  # same or lower level within cooldown: suppress duplicate
+            self._last_alert[camera_id] = (now, rank)
+
         # Generate unique alert ID
-        alert_id = f"{camera_id}_{int(time.time() * 1000)}"
+        alert_id = f"{camera_id}_{int(now * 1000)}"
         
         # Convert detections to serializable format
         detections = []
         for detection in detection_result.detections:
             detections.append({
-                'confidence': detection.confidence,
-                'bbox': detection.bbox,
+                'confidence': float(detection.confidence),
+                'bbox': [int(v) for v in detection.bbox],
                 'class_name': detection.class_name,
                 'timestamp': detection.timestamp
             })
@@ -279,10 +323,17 @@ class AlertManager:
             detections=detections
         )
         
-        # Queue alert for processing
-        self.alert_queue.put(alert)
-        
+        # Persist synchronously so the alert is visible immediately and callers can attach a frame;
+        # notify even if persistence fails (a fire alert must never be dropped silently).
+        if not self.database.save_alert(alert):
+            self.logger.critical(f"ALERT NOT PERSISTED (notifying anyway): {alert.id}")
+        self.notification_queue.put(alert)
+
         return alert
+
+    def attach_frame(self, alert: Alert, frame_path: str) -> None:
+        alert.frame_path = frame_path
+        self.database.save_alert(alert)
     
     def _process_alerts(self):
         """Process alerts in background thread"""
@@ -290,12 +341,10 @@ class AlertManager:
             try:
                 alert = self.alert_queue.get(timeout=1)
                 
-                # Save to database
+                # Legacy path: alerts queued directly are persisted, then notified regardless
                 if self.database.save_alert(alert):
                     self.logger.info(f"Alert saved: {alert.id} ({alert.alert_level.value})")
-                    
-                    # Queue for notifications
-                    self.notification_queue.put(alert)
+                self.notification_queue.put(alert)
                 
                 self.alert_queue.task_done()
                 
@@ -356,6 +405,10 @@ class AlertManager:
         """Get data for dashboard display"""
         recent_alerts = self.database.get_recent_alerts(hours=24, limit=50)
         alert_stats = self.database.get_alert_statistics(hours=24)
+        with sqlite3.connect(self.database.db_path) as conn:
+            active_count = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE status = 'active' AND timestamp > ?",
+                (time.time() - 24 * 3600,)).fetchone()[0]
         
         return {
             'recent_alerts': [
@@ -373,7 +426,7 @@ class AlertManager:
             'statistics': alert_stats,
             'system_status': {
                 'total_cameras': total_cameras,
-                'active_alerts': len([a for a in recent_alerts if a.status == 'active']),
+                'active_alerts': active_count,
                 'last_detection': recent_alerts[0].timestamp if recent_alerts else None
             }
         }
@@ -415,4 +468,4 @@ def get_alert_manager():
     if alert_manager is None:
         alert_manager = AlertManager()
     return alert_manager
-# Refactored for stability and edge performance
+

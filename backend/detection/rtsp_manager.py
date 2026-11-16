@@ -12,10 +12,9 @@ from typing import Dict, List, Optional, Callable, Tuple
 from pathlib import Path
 from queue import Queue, Empty
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import socket
 import requests
-    # Performance optimization - 2025-09-20
 import xml.etree.ElementTree as ET
 
 @dataclass
@@ -92,15 +91,8 @@ class RTSPCamera:
         self.logger.info(f"Camera {self.config.camera_id} stopped")
     
     def get_frame(self) -> Optional[np.ndarray]:
-        """Get the most recent frame"""
-        try:
-            # Get the most recent frame, discard older ones
-            frame = None
-            while not self.frame_queue.empty():
-                frame = self.frame_queue.get_nowait()
-            return frame
-        except Empty:
-            return self.current_frame
+        """Get the most recent frame (None until the first frame arrives)."""
+        return self.current_frame
     
     def _capture_loop(self):
         """Main capture loop for RTSP stream"""
@@ -135,14 +127,13 @@ class RTSPCamera:
             
             self.logger.info(f"Connecting to camera {self.config.camera_id}: {self._sanitize_url(rtsp_url)}")
             
-            # Configure OpenCV capture
-            self.cap = cv2.VideoCapture(rtsp_url)
+            # Timeouts must be passed at open time; set() afterwards has no effect.
+            timeout_ms = int(self.config.timeout * 1000)
+            self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG, [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_ms,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_ms,
+            ])
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffering
-            self.cap.set(cv2.CAP_PROP_FPS, self.config.fps)
-            
-            if self.config.resolution:
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.resolution[0])
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.resolution[1])
             
             # Test connection
             ret, frame = self.cap.read()
@@ -179,17 +170,14 @@ class RTSPCamera:
                 self.status.frame_count += 1
                 self.status.last_frame_time = time.time()
                 
-                # Add to queue (non-blocking)
-                try:
-                    self.frame_queue.put_nowait(frame)
-                except:
-                    pass  # Queue full, skip frame
-                
+                # Only the latest frame matters for detection; current_frame is it.
+                # (The old bounded queue dropped the NEWEST frame when full.)
+
                 # Calculate FPS
                 self._update_fps()
                 
-                # Small delay to control frame rate
-                time.sleep(1.0 / self.config.fps)
+                # Do not sleep: live streams must be drained continuously or latency grows
+                # (frames buffer inside FFmpeg). Rate limiting happens at the detector.
                 
             except Exception as e:
                 self.logger.error(f"Frame read error for {self.config.camera_id}: {e}")
@@ -204,7 +192,9 @@ class RTSPCamera:
             # Parse URL and add credentials
             parsed = urlparse(url)
             if not parsed.username:  # Only add if not already in URL
-                auth_url = f"{parsed.scheme}://{self.config.username}:{self.config.password}@{parsed.netloc}{parsed.path}"
+                user = quote(self.config.username, safe='')
+                pwd = quote(self.config.password, safe='')
+                auth_url = f"{parsed.scheme}://{user}:{pwd}@{parsed.netloc}{parsed.path}"
                 if parsed.query:
                     auth_url += f"?{parsed.query}"
                 return auth_url
@@ -409,8 +399,9 @@ class RTSPManager:
             success = test_camera._connect()
             
             if success:
+                res = test_camera.status.resolution
                 test_camera.stop()
-                return True, "Connection successful"
+                return True, f"Connection successful ({res[0]}x{res[1]})" if res else "Connection successful"
             else:
                 error = test_camera.status.last_error or "Unknown connection error"
                 return False, error
@@ -468,4 +459,4 @@ if __name__ == "__main__":
 
 
 
-# Refactored for stability and edge performance
+

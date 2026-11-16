@@ -49,7 +49,7 @@ export const useStableAlertSystem = () => {
         camera_id: alert.camera_id || 'Unknown',
         alert_level: alert.alert_level?.value || alert.alert_level || 'P4',
         confidence: alert.confidence || 0,
-        status: alert.acknowledged ? 'acknowledged' : 'active',
+        status: alert.status || 'active',  // backend sends status: active | acknowledged | resolved
         location: alert.location || 'Unknown',
         description: alert.description || `Alert from ${alert.camera_id || 'Unknown'}`
       };
@@ -154,10 +154,15 @@ export const useStableAlertSystem = () => {
     }
   }, [fetchDashboardData, formatAlerts, notifications, lastSuccessfulData]);
 
-  // Initial setup and periodic refresh
+  // Latest refreshData via ref so the polling effect mounts once. (It depended on refreshData,
+  // which changes on every render because useNotifications() returns a new object -> fetch storm.)
+  const refreshRef = useRef(refreshData);
+  refreshRef.current = refreshData;
+
+  // Initial setup and periodic refresh (mount once)
   useEffect(() => {
     // Initial fetch
-    refreshData(true);
+    refreshRef.current(true);
 
     // Adaptive refresh interval based on connection stability
     const getRefreshInterval = () => {
@@ -172,7 +177,7 @@ export const useStableAlertSystem = () => {
       }
       
       intervalRef.current = setTimeout(() => {
-        refreshData(false); // Background refresh
+        refreshRef.current(false); // Background refresh
         scheduleNextRefresh();
       }, getRefreshInterval());
     };
@@ -184,7 +189,7 @@ export const useStableAlertSystem = () => {
         clearTimeout(intervalRef.current);
       }
     };
-  }, [refreshData]);
+  }, []);
 
   // Enhanced add alert with deduplication
   const addAlert = useCallback((newAlert) => {

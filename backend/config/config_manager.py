@@ -10,18 +10,32 @@ from typing import Dict, Any, Optional
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+import tempfile
+
+try:
+    from .. import paths
+except ImportError:
+    import paths
+
+THRESHOLD_NAMES = ('immediate_alert', 'review_queue', 'log_only')
+
+DEFAULT_YAML = open(Path(__file__).resolve().parent.parent.parent / 'config' / 'detection_config.yaml.template').read() \
+    if (Path(__file__).resolve().parent.parent.parent / 'config' / 'detection_config.yaml.template').exists() else ''
 
 @dataclass
 class DetectionConfig:
     """Detection configuration structure"""
-    immediate_alert: float = 0.95
-    review_queue: float = 0.85
-    log_only: float = 0.70
+    immediate_alert: float = 0.75
+    review_queue: float = 0.55
+    log_only: float = 0.35
     fog_adjustment: float = -0.05
     sunset_hours: list = None
     adaptive_enabled: bool = True
     learning_window_days: int = 7
     max_auto_adjustment: float = 0.05
+    temporal_window: int = 5
+    temporal_min_hits: int = 3
+    model_path: str = "rabahdev_best.pt"
 
 @dataclass
 class SystemConfig:
@@ -40,25 +54,15 @@ class AlertConfig:
     sms_enabled: bool = False
     email_enabled: bool = False
     desktop_notifications: bool = True
+    cooldown_seconds: float = 60.0
 
 class ConfigManager:
     """Manages application configuration with hot-reload capability"""
     
-    def __init__(self, config_path: str = "config/detection_config.yaml"):
-        # Handle both relative and absolute paths, with fallback options
-        self.config_path = Path(config_path)
-        
-        # If relative path doesn't exist, try different locations
-        if not self.config_path.exists() and not self.config_path.is_absolute():
-            # Try from backend directory
-            backend_path = Path(__file__).parent.parent / config_path
-            if backend_path.exists():
-                self.config_path = backend_path
-            else:
-                # Try from project root
-                project_root = Path(__file__).parent.parent.parent / config_path
-                if project_root.exists():
-                    self.config_path = project_root
+    def __init__(self, config_path: str = None):
+        # Always resolve from SENTINEL_HOME, never from the process cwd (the Tauri shell
+        # starts the backend in src-tauri/, which used to load a different config file).
+        self.config_path = paths.resolve(config_path) if config_path else paths.DETECTION_CONFIG
         
         self.logger = logging.getLogger(__name__)
         self._config_cache = {}
@@ -108,6 +112,8 @@ class ConfigManager:
         thresholds = detection_raw.get('thresholds', {})
         environmental = detection_raw.get('environmental', {})
         adaptive = detection_raw.get('adaptive', {})
+        temporal = detection_raw.get('temporal', {})
+        model = detection_raw.get('model', {})
         
         config['detection'] = DetectionConfig(
             immediate_alert=thresholds.get('immediate_alert', 0.95),
@@ -117,11 +123,23 @@ class ConfigManager:
             sunset_hours=environmental.get('sunset_hours', [17, 19]),
             adaptive_enabled=adaptive.get('enabled', True),
             learning_window_days=adaptive.get('learning_window_days', 7),
-            max_auto_adjustment=adaptive.get('max_auto_adjustment', 0.05)
+            max_auto_adjustment=adaptive.get('max_auto_adjustment', 0.05),
+            temporal_window=int(temporal.get('window', 5)),
+            temporal_min_hits=int(temporal.get('min_hits', 3)),
+            model_path=str(model.get('path', 'rabahdev_best.pt')),
         )
         
-        # Validate thresholds are in correct order
+        # Validate thresholds: known names, numeric, inside (0, 1), and ordered
+        for key in thresholds:
+            if key not in THRESHOLD_NAMES:
+                raise ValueError(f"Unknown threshold '{key}'")
         det_config = config['detection']
+        for name in THRESHOLD_NAMES:
+            v = getattr(det_config, name)
+            if not isinstance(v, (int, float)) or not 0.0 < float(v) < 1.0:
+                raise ValueError(f"Threshold {name} must be in (0, 1), got {v!r}")
+        if not 1 <= det_config.temporal_min_hits <= det_config.temporal_window <= 30:
+            raise ValueError("temporal: require 1 <= min_hits <= window <= 30")
         if not (det_config.log_only <= det_config.review_queue <= det_config.immediate_alert):
             raise ValueError("Thresholds must be: log_only <= review_queue <= immediate_alert")
         
@@ -144,7 +162,8 @@ class ConfigManager:
             enabled=alerts_raw.get('enabled', True),
             sms_enabled=alerts_raw.get('sms_enabled', False),
             email_enabled=alerts_raw.get('email_enabled', False),
-            desktop_notifications=alerts_raw.get('desktop_notifications', True)
+            desktop_notifications=alerts_raw.get('desktop_notifications', True),
+            cooldown_seconds=float(alerts_raw.get('cooldown_seconds', 60)),
         )
         
         return config
@@ -161,40 +180,8 @@ class ConfigManager:
         """Create default configuration file"""
         os.makedirs(self.config_path.parent, exist_ok=True)
         
-        default_yaml = """# Sentinel Fire Detection Configuration
-# Edit these values to tune detection behavior
-
-detection:
-  thresholds:
-    immediate_alert: 0.95    # P1 - dispatch immediately  
-    review_queue: 0.85       # P2 - human verification
-    log_only: 0.70          # P4 - data collection
-  
-  environmental:
-    fog_adjustment: -0.05    # Reduce sensitivity in poor visibility
-    sunset_hours: [17, 19]   # Higher thresholds during challenging light conditions
-    
-  adaptive:
-    enabled: true
-    learning_window_days: 7
-    max_auto_adjustment: 0.05
-
-cameras:
-  max_concurrent: 10
-  rtsp_timeout: 5
-  frame_rate: 2  # FPS for processing (not camera FPS)
-
-system:
-  detection_latency_target: 2.0  # seconds
-  log_retention_days: 30
-  video_retention_hours: 48
-  
-alerts:
-  enabled: true
-  sms_enabled: false  # Requires SMS service configuration
-  email_enabled: false  # Requires SMTP configuration
-  desktop_notifications: true
-"""
+        default_yaml = (paths.SENTINEL_HOME / "config" / "detection_config.yaml.template").read_text() \
+            if (paths.SENTINEL_HOME / "config" / "detection_config.yaml.template").exists() else DEFAULT_YAML
         
         with open(self.config_path, 'w') as f:
             f.write(default_yaml)
@@ -218,10 +205,14 @@ alerts:
     
     def update_threshold(self, threshold_name: str, value: float) -> bool:
         """Update a detection threshold and save to file"""
+        if threshold_name not in THRESHOLD_NAMES:
+            self.logger.error(f"Rejected unknown threshold name {threshold_name!r}")
+            return False
         try:
+            value = float(value)
             # Load current config
             with open(self.config_path, 'r') as f:
-                config = yaml.safe_load(f)
+                config = yaml.safe_load(f) or {}
             
             # Update threshold
             if 'detection' not in config:
@@ -234,9 +225,8 @@ alerts:
             # Validate updated config
             self._validate_config(config)
             
-            # Save back to file
-            with open(self.config_path, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False, indent=2)
+            # Save atomically (a crash mid-write must not corrupt the config)
+            self._atomic_write(yaml.safe_dump(config, default_flow_style=False, indent=2, sort_keys=False))
             
             self.logger.info(f"Updated {threshold_name} to {value}")
             return True
@@ -245,6 +235,12 @@ alerts:
             self.logger.error(f"Failed to update threshold {threshold_name}: {e}")
             return False
     
+    def _atomic_write(self, text: str) -> None:
+        fd, tmp = tempfile.mkstemp(dir=str(self.config_path.parent), prefix='.detection_config.')
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        os.replace(tmp, self.config_path)
+
     def get_config_summary(self) -> dict:
         """Get summary of current configuration for display"""
         detection = self.get_detection_config()
@@ -257,6 +253,8 @@ alerts:
                 'review_queue': detection.review_queue,
                 'log_only': detection.log_only
             },
+            'temporal': {'window': detection.temporal_window, 'min_hits': detection.temporal_min_hits},
+            'model_path': detection.model_path,
             'system_settings': {
                 'max_cameras': system.max_concurrent_cameras,
                 'frame_rate': system.frame_rate,
@@ -264,7 +262,11 @@ alerts:
             },
             'alert_settings': {
                 'enabled': alerts.enabled,
-                'desktop_notifications': alerts.desktop_notifications
+                'desktop_notifications': alerts.desktop_notifications,
+                'cooldown_seconds': alerts.cooldown_seconds,
+                # Not implemented in this codebase - reported honestly to the UI:
+                'sms_implemented': False,
+                'email_implemented': False
             },
             'last_updated': datetime.fromtimestamp(self._last_modified).isoformat()
         }

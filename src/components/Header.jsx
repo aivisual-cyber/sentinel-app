@@ -32,7 +32,7 @@ const Header = ({ systemStatus, alertCount, isRefreshing, isStale }) => {
 
   // Determine system status configuration with better handling
   const getSystemStatusConfig = () => {
-    const health = systemStatus?.systemHealth || 'optimal'; // Default to optimal to prevent flashing
+    const health = systemStatus?.systemHealth || 'unknown'; // never default to healthy
     
     // If we're using stale data, show stable state instead of degraded state
     if (isStale && health === 'optimal') {
@@ -65,7 +65,7 @@ const Header = ({ systemStatus, alertCount, isRefreshing, isStale }) => {
       case 'critical':
         return {
           color: 'error',
-          text: 'SYSTEM CRITICAL',
+          text: systemStatus?.backendRunning ? 'SYSTEM CRITICAL' : 'DETECTION OFFLINE',
           icon: AlertTriangle,
           dotClass: 'bg-error-500 animate-pulse',
           textClass: 'text-error-400'
@@ -80,11 +80,11 @@ const Header = ({ systemStatus, alertCount, isRefreshing, isStale }) => {
         };
       default:
         return {
-          color: 'success', // Default to success instead of gray
-          text: 'SYSTEM READY',
-          icon: Shield,
-          dotClass: 'bg-success-500',
-          textClass: 'text-success-400'
+          color: 'gray',
+          text: 'STATUS UNKNOWN',
+          icon: AlertTriangle,
+          dotClass: 'bg-gray-500 animate-pulse',
+          textClass: 'text-gray-400'
         };
     }
   };
