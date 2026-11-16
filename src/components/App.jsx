@@ -4,6 +4,7 @@ import Header from './Header';
 import Navigation from './Navigation';
 import MainContent from './MainContent';
 import NotificationProvider from './shared/NotificationProvider';
+import AlarmBanner from './shared/AlarmBanner';
 import { useStableAlertSystem } from '../hooks/useStableAlertSystem';
 import { useStableSystemStatus } from '../hooks/useStableSystemStatus';
 
@@ -49,6 +50,12 @@ const App = () => {
           alertCount={alerts.filter(a => a.status === 'active').length}
           isRefreshing={isRefreshing}
           isStale={isStale}
+        />
+
+        <AlarmBanner
+          alerts={alerts}
+          onAcknowledge={handleAcknowledgeAlert}
+          onView={() => handleViewChange('incidents')}
         />
         
         <div className="flex-1 flex overflow-hidden">

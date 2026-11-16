@@ -36,6 +36,11 @@ def to_json(value) -> str:
 
 LEVEL_RANK = {'P4': 1, 'P2': 2, 'P1': 3}
 
+try:
+    from .notification_system import ExternalNotifier
+except ImportError:
+    from alerts.notification_system import ExternalNotifier
+
 class AlertLevel(Enum):
     P1 = "P1"  # Immediate alert
     P2 = "P2"  # Review queue
@@ -274,6 +279,10 @@ class AlertManager:
         self._last_alert: Dict[str, tuple] = {}  # camera_id -> (timestamp, level_rank)
         self._dedup_lock = threading.Lock()
         
+        # External delivery (email / webhook / SMS) through a persistent outbox
+        self.notifier = ExternalNotifier(db_path=str(self.database.db_path), alert_lookup=self._lookup_alert)
+        self.notifier.start()
+
         # Alert queue for processing
         self.alert_queue = Queue()
         self.notification_queue = Queue()
@@ -331,6 +340,11 @@ class AlertManager:
 
         return alert
 
+    def _lookup_alert(self, alert_id: str) -> Optional[dict]:
+        with sqlite3.connect(self.database.db_path) as conn:
+            row = conn.execute("SELECT frame_path, status FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        return {'frame_path': row[0], 'status': row[1]} if row else None
+
     def attach_frame(self, alert: Alert, frame_path: str) -> None:
         alert.frame_path = frame_path
         self.database.save_alert(alert)
@@ -364,7 +378,10 @@ class AlertManager:
                     self._send_immediate_notification(alert)
                 elif alert.alert_level == AlertLevel.P2:
                     self._send_review_notification(alert)
-                # P4 alerts are just logged
+                # P4 alerts are logged; external channels apply their own min_level
+                self.notifier.enqueue({'id': alert.id, 'alert_level': alert.alert_level.value,
+                                       'camera_id': alert.camera_id, 'confidence': alert.confidence,
+                                       'timestamp': alert.timestamp, 'frame_path': alert.frame_path})
                 
                 self.notification_queue.task_done()
                 
@@ -424,6 +441,7 @@ class AlertManager:
                 for alert in recent_alerts
             ],
             'statistics': alert_stats,
+            'notifications': self.notifier.get_status(),
             'system_status': {
                 'total_cameras': total_cameras,
                 'active_alerts': active_count,
@@ -457,6 +475,7 @@ class AlertManager:
     def stop(self):
         """Stop the alert manager"""
         self.is_running = False
+        self.notifier.stop()
         self.logger.info("Alert Manager stopped")
 
 # Global alert manager instance

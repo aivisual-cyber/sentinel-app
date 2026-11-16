@@ -83,7 +83,7 @@ const AnalyticsCenter = ({ connectionStatus }) => {
       { label: 'CPU Usage', value: 'Loading...', status: 'unknown' },
       { label: 'Memory', value: 'Loading...', status: 'unknown' },
       { label: 'Storage', value: 'Loading...', status: 'unknown' },
-      { label: 'Network', value: 'Loading...', status: 'unknown' }
+      { label: 'Backend memory', value: 'Loading...', status: 'unknown' }
     ]
   });
 
@@ -100,42 +100,22 @@ const AnalyticsCenter = ({ connectionStatus }) => {
         getSystemMetrics()
       ]);
 
-      // Get real detection performance metrics from backend
-      const alertStats = dashboardData?.alerts?.statistics || {};
-      const totalAlerts = alertStats.total_alerts || 0;
-      const falsePositives = alertStats.false_positives || 0;
-      const truePositives = alertStats.true_positives || 0;
-      
-      // Calculate metrics from real backend data
-      const accuracy = totalAlerts > 0 ? ((truePositives / totalAlerts) * 100).toFixed(1) : 'N/A';
-      const responseTime = alertStats.average_response_time ? alertStats.average_response_time.toFixed(1) : 'N/A';
-      const falsePositiveRate = totalAlerts > 0 ? ((falsePositives / totalAlerts) * 100).toFixed(1) : 'N/A';
-
-      // Use real system metrics from backend
+      // Real backend fields: statistics = {P1:{count,avg_confidence}, P2:…, P4:…, total}
+      const stats = dashboardData?.alerts?.statistics || {};
+      const totalAlerts = stats.total || 0;
+      const count = (lvl) => stats[lvl]?.count || 0;
+      const avg = (lvl) => (stats[lvl]?.avg_confidence ? `${Math.round(stats[lvl].avg_confidence * 100)}% avg` : '');
       const cpuUsage = systemMetrics?.cpu?.usage_percent || 0;
-      const memoryUsageGB = systemMetrics?.memory?.used_gb || 0;
-      const memoryUsage = memoryUsageGB.toFixed(1);
-      const networkLatency = Math.round(systemMetrics?.network?.latency_ms || 0);
-      
-      // Get real frames processed from detection performance
-      const totalFrames = systemMetrics?.detection_performance?.frames_processed || 0;
+      const memoryUsage = (systemMetrics?.memory?.used_gb || 0).toFixed(1);
+      const det = systemMetrics?.detection_performance || {};
+      const totalFrames = det.frames_processed || 0;
 
+      // Accuracy / false-positive rate need operator-verified ground truth, which is not collected yet:
+      // show measured quantities only (never fabricated percentages).
       const newPerformanceMetrics = [
-        { 
-          label: 'Accuracy Rate', 
-          value: accuracy === 'N/A' ? 'N/A' : `${accuracy}%`, 
-          color: accuracy === 'N/A' ? 'gray' : (parseFloat(accuracy) > 95 ? 'emerald' : parseFloat(accuracy) > 90 ? 'yellow' : 'red')
-        },
-        { 
-          label: 'Response Time', 
-          value: responseTime === 'N/A' ? 'N/A' : `${responseTime}s`, 
-          color: responseTime === 'N/A' ? 'gray' : (parseFloat(responseTime) < 1.5 ? 'emerald' : parseFloat(responseTime) < 2.5 ? 'yellow' : 'red')
-        },
-        { 
-          label: 'False Positive Rate', 
-          value: falsePositiveRate === 'N/A' ? 'N/A' : `${falsePositiveRate}%`, 
-          color: falsePositiveRate === 'N/A' ? 'gray' : (parseFloat(falsePositiveRate) < 3 ? 'emerald' : parseFloat(falsePositiveRate) < 5 ? 'yellow' : 'red')
-        }
+        { label: 'P1 alerts (24 h)', value: `${count('P1')} ${avg('P1')}`.trim(), color: count('P1') ? 'red' : 'emerald' },
+        { label: 'P2 alerts (24 h)', value: `${count('P2')} ${avg('P2')}`.trim(), color: count('P2') ? 'yellow' : 'emerald' },
+        { label: 'P4 events (24 h)', value: `${count('P4')} ${avg('P4')}`.trim(), color: 'gray' }
       ];
 
       const newSystemMetrics = [
@@ -143,6 +123,11 @@ const AnalyticsCenter = ({ connectionStatus }) => {
           label: 'Frames Processed', 
           value: totalFrames.toLocaleString(), 
           color: 'white' 
+        },
+        {
+          label: 'Confirmed detections',
+          value: (det.detections_made || 0).toLocaleString(),
+          color: 'white'
         },
         { 
           label: 'GPU Usage', 
@@ -168,8 +153,8 @@ const AnalyticsCenter = ({ connectionStatus }) => {
 
       setAlertStats({
         totalAlerts,
-        falsePositives,
-        averageResponseTime: alertStats.average_response_time || 0,
+        falsePositives: 0,
+        averageResponseTime: 0,
         uptime: systemMetrics?.system?.uptime_hours || 0
       });
 
@@ -182,8 +167,8 @@ const AnalyticsCenter = ({ connectionStatus }) => {
         },
         { 
           label: 'Camera Network', 
-          status: dashboardData?.alerts?.camera_status === 'connected' ? 'ONLINE' : 'CHECKING', 
-          color: dashboardData?.alerts?.camera_status === 'connected' ? 'emerald' : 'yellow' 
+          status: `${dashboardData?.alerts?.system_status?.total_cameras ?? 0} CONFIGURED`,
+          color: (dashboardData?.alerts?.system_status?.total_cameras ?? 0) > 0 ? 'emerald' : 'yellow' 
         },
         { 
           label: 'Alert System', 
@@ -216,10 +201,11 @@ const AnalyticsCenter = ({ connectionStatus }) => {
           value: `${storageUsage}%`, 
           status: storageUsage < 70 ? 'good' : storageUsage < 85 ? 'warning' : 'critical' 
         },
-        { 
-          label: 'Network', 
-          value: `${networkLatency}ms`, 
-          status: networkLatency < 15 ? 'excellent' : networkLatency < 25 ? 'good' : 'warning' 
+        {
+          // backend latency figure is an estimate from packet counts, not a measurement - not shown
+          label: 'Backend memory',
+          value: `${Math.round(systemMetrics?.memory?.process_memory_mb || 0)} MB`,
+          status: 'good'
         }
       ];
 
@@ -331,16 +317,12 @@ const AnalyticsCenter = ({ connectionStatus }) => {
               <span className="text-xs font-command text-white">{alertStats.totalAlerts}</span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-gray-300">System Uptime</span>
-              <span className="text-xs font-command text-emerald-400">{alertStats.uptime.toFixed(1)}%</span>
+              <span className="text-gray-300">Backend uptime</span>
+              <span className="text-xs font-command text-emerald-400">{alertStats.uptime.toFixed(1)} h</span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-gray-300">Avg Response Time</span>
-              <span className="text-xs font-command text-safety-400">{alertStats.averageResponseTime.toFixed(1)}s</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-gray-300">False Positives</span>
-              <span className="text-xs font-command text-warning-400">{alertStats.falsePositives}</span>
+              <span className="text-gray-300">Accuracy / false-positive rate</span>
+              <span className="text-xs font-command text-gray-400">needs operator verification data</span>
             </div>
           </div>
         </div>

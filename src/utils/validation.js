@@ -3,7 +3,7 @@
  */
 
 // Threshold validation
-export const validateThreshold = (value, min = 50, max = 100) => {
+export const validateThreshold = (value, min = 10, max = 99) => {
   const numValue = parseFloat(value);
   
   if (isNaN(numValue)) {

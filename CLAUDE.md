@@ -85,16 +85,28 @@ sunset_hours: [17, 19]   # Higher thresholds during challenging light
 ## Development Commands
 
 ### Testing
-- Run detection tests: `python -m pytest tests/`
+- Run all tests: `python -m pytest tests/`
+- Compare models on real images: `python docs/analysis/bench_models.py <pos_root> <neg_dir> <neg_dir2> name=model.pt`
 - Performance benchmarks: `python scripts/benchmark.py`
 - Configuration validation: `python scripts/validate_config.py`
 
 ### Deployment
 - Build Tauri application: `cargo tauri build`
 - Package for distribution: `cargo tauri bundle`
-- System health check: `python scripts/health_check.py`
+- System health check: `curl http://127.0.0.1:8765/api/health`
 
-## Current Status - PHASE 2 COMPLETE ✅ PRODUCTION READY
+## Current Status - VERIFIED WORKING PIPELINE, NOT YET SITE-VALIDATED
+
+> The feature lists below were written before an end-to-end review (docs/ANALYSIS_AND_PLAN.md) that found the
+> detection→alert chain broken; it is now fixed and covered by tests. Treat items not listed as verified in
+> README "Current status" (e.g. network failover, sunset/fog compensation, field-test suite) as unimplemented.
+> Never claim "production ready" for life safety: run a site trial and measure false alarms first.
+>
+> Key facts for development: paths resolve from SENTINEL_HOME (backend/paths.py); model + class names +
+> thresholds + temporal confirmation live in config/detection_config.yaml; external alerts in
+> config/notifications.yaml (secrets via env vars); Tauri commands use snake_case args; run `pytest tests/`.
+
+### Original roadmap status (historical)
 
 ### ✅ Phase 1 Features (Foundation)
 - **Complete Tauri GUI** - Professional fire safety command center interface

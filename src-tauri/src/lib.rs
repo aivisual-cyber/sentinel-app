@@ -24,14 +24,35 @@ pub struct AppState {
     pub python_process: Arc<Mutex<Option<Child>>>,
     pub api_base_url: String,
     pub client: reqwest::Client,
+    /// Per-launch API token passed to the spawned backend and sent on every request
+    pub api_token: String,
+}
+
+/// 256-bit random token from the OS-seeded SipHash keys of std's RandomState
+fn generate_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    (0..4).map(|i| {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u64(i);
+        format!("{:016x}", h.finish())
+    }).collect()
 }
 
 impl AppState {
     pub fn new() -> Self {
+        let api_token = generate_token();
+        let mut headers = reqwest::header::HeaderMap::new();
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_token))
+            .expect("token is ASCII hex");
+        auth.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, auth);
         Self {
             python_process: Arc::new(Mutex::new(None)),
-            api_base_url: "http://localhost:8765".to_string(),
-            client: reqwest::Client::new(),
+            api_base_url: "http://127.0.0.1:8765".to_string(),
+            client: reqwest::Client::builder().default_headers(headers).build()
+                .expect("failed to build HTTP client"),
+            api_token,
         }
     }
 }
@@ -64,13 +85,16 @@ async fn start_python_backend_internal(state: Arc<AppState>) -> Result<bool, Str
     // Additional check: test if port 8765 is already in use
     if std::net::TcpStream::connect("127.0.0.1:8765").is_ok() {
         let url = format!("{}/api/health", state.api_base_url);
-        let is_sentinel = match state.client.get(&url).timeout(Duration::from_secs(2)).send().await {
-            Ok(r) => r.json::<serde_json::Value>().await.ok()
-                .and_then(|v| v.get("detector_loaded").cloned()).is_some(),
-            Err(_) => false,
+        let health = match state.client.get(&url).timeout(Duration::from_secs(2)).send().await {
+            Ok(r) => r.json::<serde_json::Value>().await.ok(),
+            Err(_) => None,
         };
-        if is_sentinel {
-            println!("Sentinel backend already running on port 8765");
+        if let Some(h) = health.filter(|v| v.get("detector_loaded").is_some()) {
+            if h.get("auth_required").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("Another Sentinel backend (with its own API token) is already running on port 8765. \
+                            Stop it, then restart the app.".to_string());
+            }
+            println!("Sentinel backend already running on port 8765 (no token required)");
             return Ok(true);
         }
         return Err("Port 8765 is in use by another program; Sentinel backend cannot start".to_string());
@@ -139,6 +163,7 @@ async fn start_python_backend_internal(state: Arc<AppState>) -> Result<bool, Str
         .arg(&backend_script)
         .current_dir(&sentinel_home)
         .env("SENTINEL_HOME", &sentinel_home)
+        .env("SENTINEL_API_TOKEN", &state.api_token)
         .stdout(Stdio::inherit())  // Show output for debugging
         .stderr(Stdio::inherit())  // Show errors for debugging
         .spawn()
@@ -406,15 +431,21 @@ async fn add_camera(
     camera_id: String,
     rtsp_url: String,
     username: Option<String>,
-    password: Option<String>
+    password: Option<String>,
+    name: Option<String>,
+    location: Option<String>,
+    fps: Option<u32>
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}/api/cameras/add", state.api_base_url);
     
     let mut payload = serde_json::json!({
         "camera_id": camera_id,
         "rtsp_url": rtsp_url,
-        "enabled": true
+        "enabled": true,
+        "fps": fps.unwrap_or(15)
     });
+    if let Some(n) = name { payload["name"] = serde_json::Value::String(n); }
+    if let Some(l) = location { payload["location"] = serde_json::Value::String(l); }
 
     if let Some(user) = username {
         payload["username"] = serde_json::Value::String(user);
@@ -515,6 +546,38 @@ async fn remove_camera(
     Ok(data)
 }
 
+async fn api_get(state: &AppState, path: &str) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", state.api_base_url, path);
+    let response = state.client.get(&url).timeout(Duration::from_secs(10)).send().await
+        .map_err(|e| format!("Request to {} failed: {}", path, e))?;
+    let status = response.status();
+    let data: serde_json::Value = response.json().await
+        .map_err(|e| format!("Invalid response from {}: {}", path, e))?;
+    if !status.is_success() {
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("API error").to_string());
+    }
+    Ok(data)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn get_alert_frame(state: State<'_, AppState>, alert_id: String) -> Result<serde_json::Value, String> {
+    api_get(&state, &format!("/api/alerts/{}/frame", alert_id)).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn get_notifications(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    api_get(&state, "/api/notifications").await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn test_notification(state: State<'_, AppState>, channel: String) -> Result<serde_json::Value, String> {
+    let url = format!("{}/api/notifications/test", state.api_base_url);
+    let response = state.client.post(&url).json(&serde_json::json!({ "channel": channel }))
+        .timeout(Duration::from_secs(30)).send().await
+        .map_err(|e| format!("Failed to send test notification: {}", e))?;
+    response.json().await.map_err(|e| format!("Invalid response: {}", e))
+}
+
 // Real-time data streaming setup
 fn setup_real_time_data_stream(app_handle: AppHandle, state: Arc<AppState>) {
     // Use Tauri's async runtime instead of tokio::spawn
@@ -581,7 +644,10 @@ pub fn run() {
             test_camera,
             remove_camera,
             get_system_status,
-            get_system_metrics
+            get_system_metrics,
+            get_alert_frame,
+            get_notifications,
+            test_notification
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

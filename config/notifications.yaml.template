@@ -1,0 +1,35 @@
+# Sentinel - external alert delivery
+# Copy to notifications.yaml and enable the channels you need.
+# Secrets are NEVER stored here: set the environment variables named by *_env.
+# Alerts raised while offline are kept in an outbox and retried (up to max_age_hours).
+
+site_name: "Main warehouse"
+max_age_hours: 24
+
+channels:
+  email:
+    enabled: false
+    min_level: P2                 # P1 | P2 | P4  (send alerts at this level and above)
+    smtp_host: smtp.example.com
+    smtp_port: 587
+    starttls: true
+    username: alerts@example.com
+    password_env: SENTINEL_SMTP_PASSWORD
+    from: alerts@example.com
+    to: [safety-team@example.com]
+    attach_frame: true            # attach the annotated alert image
+
+  webhook:                        # Slack / Teams / n8n / Home Assistant / any HTTP endpoint
+    enabled: false
+    min_level: P2
+    url_env: SENTINEL_WEBHOOK_URL # or set url: directly if it is not secret
+    format: generic               # generic | slack
+
+  sms:
+    enabled: false
+    min_level: P1
+    provider: twilio
+    account_sid: ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    auth_token_env: SENTINEL_TWILIO_TOKEN
+    from: "+15550000000"
+    to: ["+15551234567"]

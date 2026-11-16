@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Save, RefreshCw, Check, AlertTriangle, Settings, Info } from 'lucide-react';
+import { Save, RefreshCw, Check, AlertTriangle, Settings, Info, Bell, Send } from 'lucide-react';
 import { useTauriCommand } from '../../hooks/useTauriApi';
 import { useNotifications } from '../../hooks/useNotifications';
 import { validateThreshold, validateThresholdRanges } from '../../utils/validation';
@@ -22,7 +22,7 @@ const ThresholdSlider = ({ label, id, value, colorScheme, onChange, isUpdating, 
   const handleCommit = () => {
     if (localValue !== value) {
       // Validate individual threshold
-      const validation = validateThreshold(localValue, 50, 100);
+      const validation = validateThreshold(localValue, 10, 99);
       if (!validation.isValid) {
         return; // Don't commit invalid values
       }
@@ -53,8 +53,8 @@ const ThresholdSlider = ({ label, id, value, colorScheme, onChange, isUpdating, 
       <div className="relative">
         <input 
           type="range" 
-          min="50" 
-          max="100" 
+          min="10" 
+          max="99" 
           value={localValue}
           onChange={(e) => handleLocalChange(parseInt(e.target.value))}
           onMouseUp={handleCommit}
@@ -101,15 +101,16 @@ const ToggleSetting = ({ label, description, checked, onChange, disabled }) => (
 
 const DetectionSettingsReal = () => {
   const [thresholds, setThresholds] = useState({
-    immediate_alert: 95,  // Default: 95%
-    review_queue: 85,     // Default: 85%
-    log_only: 70          // Default: 70%
+    immediate_alert: 75,  // calibrated default (replaced by backend value on load)
+    review_queue: 55,
+    log_only: 35
   });
 
   const [settings, setSettings] = useState({});
   const [updatingThresholds, setUpdatingThresholds] = useState({});
   const [lastSaved, setLastSaved] = useState(null);
   const [validationErrors, setValidationErrors] = useState({});
+  const [pipeline, setPipeline] = useState(null);
 
   // Hooks
   const notifications = useNotifications();
@@ -127,13 +128,16 @@ const DetectionSettingsReal = () => {
         // Extract threshold values from config
         if (data.config.detection_thresholds) {
           const newThresholds = {
-            immediate_alert: data.config.detection_thresholds.immediate_alert ? Math.round(data.config.detection_thresholds.immediate_alert * 100) : 95,
-            review_queue: data.config.detection_thresholds.review_queue ? Math.round(data.config.detection_thresholds.review_queue * 100) : 85,
-            log_only: data.config.detection_thresholds.log_only ? Math.round(data.config.detection_thresholds.log_only * 100) : 70
+            immediate_alert: data.config.detection_thresholds.immediate_alert ? Math.round(data.config.detection_thresholds.immediate_alert * 100) : 75,
+            review_queue: data.config.detection_thresholds.review_queue ? Math.round(data.config.detection_thresholds.review_queue * 100) : 55,
+            log_only: data.config.detection_thresholds.log_only ? Math.round(data.config.detection_thresholds.log_only * 100) : 35
           };
           setThresholds(newThresholds);
         }
         
+        if (data.config.temporal) setPipeline({ temporal: data.config.temporal,
+          cooldown: data.config.alert_settings?.cooldown_seconds, model: data.config.model_path });
+
         // Extract other settings if available
         if (data.config.settings) {
           setSettings(prev => ({
@@ -156,7 +160,7 @@ const DetectionSettingsReal = () => {
       setValidationErrors(prev => ({ ...prev, [id]: null }));
       
       // Validate the individual threshold first
-      const individualValidation = validateThreshold(value, 50, 100);
+      const individualValidation = validateThreshold(value, 10, 99);
       if (!individualValidation.isValid) {
         setValidationErrors(prev => ({ ...prev, [id]: individualValidation.error }));
         notifications.operations.validationError(individualValidation.error);
@@ -319,14 +323,85 @@ const DetectionSettingsReal = () => {
         <div className="mt-6 p-4 bg-gray-800/50 rounded-lg">
           <h4 className="text-sm font-semibold text-gray-300 mb-2">Threshold Guidelines</h4>
           <div className="text-xs text-gray-500 space-y-1">
-            <div>• <strong>P1 (95%+):</strong> Only the most confident detections trigger immediate alerts</div>
-            <div>• <strong>P2 (85%+):</strong> Medium confidence detections requiring human review</div>
-            <div>• <strong>P4 (70%+):</strong> Low confidence detections logged for analysis</div>
+            <div>• Defaults (75 / 55 / 35 %) were calibrated for the bundled fire/smoke model on 268 real fire images and 130 everyday scenes. Raising P1 above ~85 % means it will almost never fire.</div>
+            <div>• A level is raised only when it persists:
+              {pipeline ? ` ${pipeline.temporal.min_hits} of the last ${pipeline.temporal.window} analysed frames` : ' N of the last M frames'}.
+              {pipeline?.cooldown ? ` One alert per camera per ${pipeline.cooldown}s unless the level escalates.` : ''}</div>
+            {pipeline?.model && <div>• Model: <span className="font-mono">{pipeline.model}</span> (set in config/detection_config.yaml)</div>}
+            <div>• Changes apply to running detection within seconds.</div>
           </div>
         </div>
       </div>
-      
+
+      <NotificationChannels />
     </motion.div>
+  );
+};
+
+const CHANNEL_LABELS = { email: 'Email (SMTP)', webhook: 'Webhook (Slack / Teams / HTTP)', sms: 'SMS (Twilio)' };
+
+const NotificationChannels = () => {
+  const { execute: getNotifications } = useTauriCommand('get_notifications');
+  const { execute: testNotification } = useTauriCommand('test_notification');
+  const [channels, setChannels] = useState(null);
+  const [testing, setTesting] = useState(null);
+  const notifications = useNotifications();
+
+  const load = useCallback(async () => {
+    const data = await getNotifications();
+    if (data && data.channels) setChannels(data.channels);
+  }, [getNotifications]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const sendTest = async (name) => {
+    setTesting(name);
+    const r = await testNotification({ channel: name });
+    setTesting(null);
+    if (r && r.success) notifications.showSuccess(`Test sent via ${CHANNEL_LABELS[name]}`);
+    else notifications.showError(`Test via ${CHANNEL_LABELS[name]} failed: ${r?.message || 'backend unavailable'}`);
+    load();
+  };
+
+  const fmt = (t) => (t ? new Date(t * 1000).toLocaleString() : '—');
+
+  return (
+    <div className="glass rounded-xl p-6 mt-6">
+      <div className="flex items-center mb-4">
+        <Bell className="w-6 h-6 text-fire-400 mr-3" />
+        <div>
+          <h3 className="text-xl font-semibold text-white">Alert delivery</h3>
+          <p className="text-sm text-gray-400">
+            In-app alarm is always on. External channels are configured in <span className="font-mono">config/notifications.yaml</span>;
+            secrets come from environment variables. Undelivered alerts are retried when the network returns.
+          </p>
+        </div>
+      </div>
+      {!channels ? <p className="text-gray-500 text-sm">Backend not reachable.</p> : (
+        <div className="space-y-3">
+          {Object.entries(channels).map(([name, c]) => (
+            <div key={name} className="p-4 rounded-lg border border-gray-700 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="font-semibold text-gray-200 flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${!c.enabled ? 'bg-gray-500' : c.last_error ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                  {CHANNEL_LABELS[name] || name}
+                  <span className="text-xs font-normal text-gray-500">{c.enabled ? `${c.min_level}+` : 'disabled'}</span>
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  sent {c.sent} · failed {c.failed} · pending {c.pending} · last success {fmt(c.last_success)}
+                </div>
+                {c.last_error && <div className="text-xs text-red-400 mt-1 truncate">Last error: {c.last_error}</div>}
+              </div>
+              <button disabled={!c.enabled || testing === name} onClick={() => sendTest(name)}
+                className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-1 ${c.enabled
+                  ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-800 text-gray-500 cursor-not-allowed'}`}>
+                <Send className="w-4 h-4" /> {testing === name ? 'Sending…' : 'Send test'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 };
 

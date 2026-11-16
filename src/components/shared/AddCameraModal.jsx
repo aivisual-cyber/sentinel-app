@@ -10,7 +10,9 @@ const AddCameraModal = ({ isOpen, onClose, onAddCamera, onTestConnection, onDisc
     rtspUrl: '',
     username: '',
     password: '',
-    fps: 15
+    fps: 15,
+    name: '',
+    location: ''
   });
   
   const [errors, setErrors] = useState({});
@@ -158,7 +160,9 @@ const AddCameraModal = ({ isOpen, onClose, onAddCamera, onTestConnection, onDisc
         rtspUrl: formData.rtspUrl.trim(),
         username: formData.username.trim() || null,
         password: formData.password.trim() || null,
-        fps: parseInt(formData.fps)
+        fps: parseInt(formData.fps),
+        name: formData.name.trim() || null,
+        location: formData.location.trim() || null
       };
       
       await onAddCamera(config);
@@ -172,7 +176,9 @@ const AddCameraModal = ({ isOpen, onClose, onAddCamera, onTestConnection, onDisc
         rtspUrl: '',
         username: '',
         password: '',
-        fps: 15
+        fps: 15,
+        name: '',
+        location: ''
       });
       setErrors({});
       setConnectionTestResult(null);
@@ -193,7 +199,9 @@ const AddCameraModal = ({ isOpen, onClose, onAddCamera, onTestConnection, onDisc
       rtspUrl: '',
       username: '',
       password: '',
-      fps: 15
+      fps: 15,
+      name: '',
+      location: ''
     });
     setErrors({});
     setConnectionTestResult(null);
@@ -297,6 +305,20 @@ const AddCameraModal = ({ isOpen, onClose, onAddCamera, onTestConnection, onDisc
                 {errors.cameraId && (
                   <p className="text-red-400 text-sm mt-1">{errors.cameraId}</p>
                 )}
+              </div>
+
+              {/* Display name + location (shown on camera tiles, alerts and notifications) */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Display name</label>
+                  <input type="text" name="name" value={formData.name} onChange={handleInputChange}
+                    placeholder="e.g., Kitchen east" className="input-field" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Location</label>
+                  <input type="text" name="location" value={formData.location} onChange={handleInputChange}
+                    placeholder="e.g., Building A, floor 1" className="input-field" />
+                </div>
               </div>
 
               {/* RTSP URL */}

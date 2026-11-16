@@ -122,13 +122,16 @@ export const useCameraManager = () => {
   // Add a new camera
   const addNewCamera = useCallback(async (cameraConfig) => {
     try {
-      const { cameraId, rtspUrl, username, password } = cameraConfig;
-      
+      const { cameraId, rtspUrl, username, password, name, location, fps } = cameraConfig;
+
       const result = await addCamera({
         camera_id: cameraId,
         rtsp_url: rtspUrl,
         username,
-        password
+        password,
+        name: name || null,
+        location: location || null,
+        fps: Number.isFinite(fps) ? fps : 15
       });
       
       if (result && result.success) {
@@ -136,7 +139,7 @@ export const useCameraManager = () => {
         await refreshCameras();
         return { success: true, message: result.message };
       } else {
-        return { success: false, message: 'Failed to add camera' };
+        return { success: false, message: (result && result.error) || 'Failed to add camera (see backend log)' };
       }
     } catch (error) {
       console.error('Failed to add camera:', error);

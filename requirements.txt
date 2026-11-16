@@ -25,9 +25,11 @@ netifaces>=0.11.0
 # Camera & Streaming
 imutils>=0.5.4
 onvif-zeep>=0.2.12  # ONVIF camera discovery
+pyserial>=3.5  # Arduino sensor bridge (optional hardware)
 
 # Development & Testing
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+pytest-aiohttp>=1.0.5
 black>=23.0.0
 flake8>=6.0.0

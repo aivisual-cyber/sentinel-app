@@ -50,6 +50,7 @@ export const useStableAlertSystem = () => {
         alert_level: alert.alert_level?.value || alert.alert_level || 'P4',
         confidence: alert.confidence || 0,
         status: alert.status || 'active',  // backend sends status: active | acknowledged | resolved
+        has_frame: !!alert.has_frame,
         location: alert.location || 'Unknown',
         description: alert.description || `Alert from ${alert.camera_id || 'Unknown'}`
       };
@@ -168,7 +169,7 @@ export const useStableAlertSystem = () => {
     const getRefreshInterval = () => {
       if (!connectionStableRef.current) return 5000;  // 5s when unstable
       if (retryCountRef.current > 0) return 10000;    // 10s after errors
-      return 20000; // 20s when stable (longer than original for efficiency)
+      return 5000; // 5s: a P1 must reach the operator quickly
     };
 
     const scheduleNextRefresh = () => {

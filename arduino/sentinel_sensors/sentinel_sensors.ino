@@ -28,18 +28,24 @@
 // Sensor objects
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// Sensor data structure (24 bytes)
+// Sensor data structure (25 bytes, packed) - must match PACKET_FORMAT '<BfffffBHB' in arduino_bridge.py
 struct SensorData {
   uint8_t sync;           // Sync byte
   float temperature;      // DHT22
   float humidity;         // DHT22
   float smoke_ppm;        // MQ-2
-  float co_ppm;           // MQ-135
+  float co_ppm;           // MQ-135 (air-quality sensor; NOT a calibrated CO sensor - use MQ-7 for CO)
   float reserved;         // Future use
   uint8_t flame_detected; // Digital flame sensor
   uint16_t ir_value;      // Analog flame reading
   uint8_t end;            // End byte
 } __attribute__((packed));
+
+// Datasheet clean-air ratios Rs/R0. Calibration measures Rs in clean air, so R0 = Rs / ratio.
+// (Previously R0 = Rs, i.e. ratio 1 in clean air -> MQ-2 read ~614 "ppm smoke" and MQ-135 ~117
+//  "ppm CO" in clean air, permanently above the alert thresholds and sounding the buzzer.)
+#define MQ2_CLEAN_AIR_RATIO 9.83
+#define MQ135_CLEAN_AIR_RATIO 3.6
 
 // Calibration values
 float R0_MQ2 = 10.0;    // Calibrated in clean air
@@ -151,6 +157,7 @@ float calculatePPM_MQ135(int raw_adc) {
 }
 
 float calculateResistance(int raw_adc) {
+  if (raw_adc < 1) raw_adc = 1;  // avoid division by zero (disconnected sensor reads 0)
   float voltage = raw_adc * (5.0 / 1023.0);
   float rs_gas = ((5.0 * RL_VALUE) / voltage) - RL_VALUE;
   return rs_gas;
@@ -246,8 +253,8 @@ void performCalibration() {
     digitalWrite(LED_STATUS, i % 2);
   }
   
-  R0_MQ2 = mq2_sum / samples;
-  R0_MQ135 = mq135_sum / samples;
+  R0_MQ2 = (mq2_sum / samples) / MQ2_CLEAN_AIR_RATIO;
+  R0_MQ135 = (mq135_sum / samples) / MQ135_CLEAN_AIR_RATIO;
   
   calibrated = true;
   digitalWrite(LED_STATUS, LOW);

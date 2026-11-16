@@ -513,10 +513,58 @@ All verified with `pytest` (**51 passed**, previously 37 passed / 2 failed), `ca
 
 **Behaviour to know:** an alert's *level* is the temporally confirmed level (≥ `min_hits` of the last `window` analysed frames), while the shown *confidence* is that frame's peak — so "P2 @ 92 %" is possible when only one or two recent frames exceeded P1. **Known misses:** small flames (e.g. the hand-held flame in the dataset frame used for the "lobby" camera) were not detected by any tested model at these thresholds.
 
-### Still open (not done here)
-- Real network RTSP transport not exercised live (running a downloaded RTSP server binary was not permitted in this session); covered by code + timeouts + reconnect logic.
-- SMS/email/Twilio, network failover, sunset/fog compensation: not implemented — config now says so; UI toggles should be hidden or wired.
-- No API authentication token yet (CORS + localhost bind only); Python backend not yet packaged as a Tauri sidecar for bundled builds.
-- Arduino packet size (25 vs 24) and MQ sensor calibration (§5.1) — firmware/bridge not touched.
-- Better weights need GPU fine-tuning with hard negatives (§4.3).
-- README/CLAUDE.md "PRODUCTION READY" claims remain untrue; should be revised by the maintainers.
+### Still open after round 1 → see §10 for what round 2 closed
+
+---
+
+## 10. Round 2 — completing the product (verified)
+
+| # | Gap | Change | Verification |
+|---|---|---|---|
+| R1 | Nobody is told about a fire unless they stare at the screen | **Alarm banner**: P1 = red banner + repeating two-tone siren (Web Audio, no assets, offline) + OS notification; P2 = amber banner + chime; *Acknowledge*, *Silence 5 min*, *View* | Live: banner appeared for kitchen P1; acknowledging cleared it (1 → 0), no page errors |
+| R2 | "SMS/Email with Twilio" existed only in docs | `backend/alerts/notification_system.py`: **email (SMTP, frame attached), webhook (generic/Slack), Twilio SMS**; per-channel `min_level`; **persistent outbox** with exponential-backoff retry so alerts raised offline are delivered later; secrets from env vars; status + "Send test" in the UI | Live: webhook receiver got the P2 and P1 alerts, P4 filtered; tests incl. real local HTTP server, fake SMTP with attachment, offline→recover |
+| R3 | Any local process could drive the API | **Per-launch API token**: Tauri generates 256-bit token, passes it to the backend it spawns, sends it on every request; backend enforces when `SENTINEL_API_TOKEN` is set (`/api/health` open); refuses to adopt a foreign token-protected backend | Live: no/wrong token → 401; tests |
+| R4 | "Acknowledge all" only hid alerts in the UI (they returned on next poll) | Real backend acknowledge for each alert; Active / Acknowledged tabs | Live |
+| R5 | Evidence frames stored but never viewable | **Evidence viewer** (annotated alert frame) in Incident Management via new `get_alert_frame` command | Live screenshot below |
+| R6 | Settings sliders limited to 50–100 % → calibrated P4 = 35 % impossible to show/set; guideline text quoted 95/85/70 | Range 10–99 %, calibrated defaults, live explanation of temporal confirmation/cooldown/model; **Alert delivery panel** | Live screenshot |
+| R7 | Analytics showed fields the backend never sent ("N/A"/"CHECKING" forever) and a fabricated latency | Measured values only: alerts per level + avg confidence, frames analysed, confirmed detections, cameras configured; accuracy shown as "needs operator verification data" | Live screenshot |
+| R8 | Add-camera dropped name/location/fps; errors swallowed | Form fields + passed through Rust → API; backend reason shown to the user | — |
+| R9 | Alerts reached UI only every 20 s when "stable" | 5 s poll (+ Tauri 5 s push) | — |
+| R10 | Arduino: 24 vs 25-byte packet → every packet rejected; reconnect self-join crash; clean-air calibration alarmed permanently; ADC 0 divide-by-zero | Packet size from `struct.calcsize`; reconnect in separate thread; `R0 = Rs / clean-air ratio` (MQ-2 9.83, MQ-135 3.6); ADC guard; `pyserial` in requirements | Tests: real packed packets interleaved with firmware text lines; clean air now < alert thresholds (old formula ≥) |
+| R11 | Network camera path never exercised live | Live test with a real network stream (ffmpeg HTTP MPEG-TS server; ffmpeg cannot act as an RTSP *server* and the MediaMTX binary was not permitted) through the same `RTSPCamera` code: connect test 640×640, auto-reconnect, outage detected (`connecting`, last frame age shown), **automatic recovery** when the stream returned, P4→P2→P1 alerts + webhook delivery | Live |
+| R12 | Stale `last_error` after reconnect | Cleared on successful connect | — |
+
+![Alarm banner](analysis/v2_command_alarm.png)
+*P1 alarm banner over live data from a network camera.*
+
+![Evidence](analysis/v2_evidence.png)
+![Settings](analysis/v2_settings.png)
+![Analytics](analysis/v2_analytics.png)
+
+### Remaining limitations (honest)
+- **Detection quality is the ceiling.** Image-level recall 62–79 % at usable thresholds on an independent set; small/hand-held flames missed; single-frame false alarms 5–7 % on everyday scenes (mitigated, not eliminated, by temporal confirmation). Must be measured on the actual site before relying on it.
+- No hard-negative fine-tuning yet (needs GPU; recipe in §4.3).
+- Installers: the Python backend is not yet packaged as a Tauri sidecar, so `cargo tauri build` produces a UI that expects a Python env next to it; `scripts/install.sh|ps1` still contain unverified steps.
+- Not implemented: sunset/fog threshold compensation, network failover (module exists, not wired), ONVIF discovery beyond the basic probe, multi-user roles.
+- RTSP *protocol* specifically (vs HTTP stream) not exercised live here; same OpenCV/FFmpeg path.
+- AGPL-3.0 model licence (out of scope for testing per owner).
+
+---
+
+## 11. Verdict — is it worth it, deployable, usable?
+
+**Before this work: not usable for its purpose.** The codebase looked complete (polished UI, installers, many modules, long changelog) but no fire could produce a stored, visible or delivered alert, the UI reported "all systems operational" with nothing running, and much of the claimed functionality (SMS/email, failover, adaptive thresholds, training) was stubs or synthetic. The repository history is generated and its commit messages are not evidence of work. Judged against its own README, it was a prototype dressed as a product.
+
+**Is the codebase worth building on? Yes, with caveats.** The architecture (Tauri shell ↔ local HTTP ↔ Python CV engine, SQLite, YAML config) is sound and conventional; most problems were integration bugs, not design flaws, and were fixable in-place. The UI component work is genuinely good. Dead/duplicate modules (`performance_optimizer`, `network_monitor`, `model_trainer`, `rtsp_advanced`) should be either wired in or deleted.
+
+**Is it usable now? Yes — as a supplementary, operator-attended monitoring tool**, on a Linux/Windows PC with Python, for a pilot:
+- end-to-end chain works and is tested (detection → confirmation → storage → evidence → siren/banner → email/webhook/SMS → acknowledge);
+- it fails loudly (DETECTION OFFLINE, camera `connecting`, delivery errors visible) instead of silently;
+- configuration, cameras and alerts survive restarts.
+
+**Is it deployable to production? Not yet, for three reasons:**
+1. **Detection performance is unproven on the target site.** Required before go-live: a 2–4 week shadow trial per site logging every alert with operator verdict (true/false), then set thresholds from that data. Expect to fine-tune the model with site negatives.
+2. **Packaging.** Bundle the backend (PyInstaller sidecar or a systemd/Windows service using `run_sentinel.py`, which now works) and verify installers on clean machines.
+3. **Operational hardening.** A watchdog that alerts when Sentinel itself stops (e.g. external heartbeat to the webhook), log rotation, and a documented operator procedure.
+
+**Recommended next steps (priority):** (1) site shadow trial with an "operator verdict" button on each alert to collect ground truth → real accuracy/false-alarm metrics in Analytics; (2) fine-tune YOLO11s on D-Fire + FASDD + site negatives, select by recall at ≤1 % false alarms; (3) sidecar packaging + heartbeat watchdog; (4) delete or wire the dormant modules.

@@ -139,6 +139,7 @@ class RTSPCamera:
             ret, frame = self.cap.read()
             if ret and frame is not None:
                 self.status.connected = True
+                self.status.last_error = None
                 self.status.resolution = (int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                                         int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
                 self.logger.info(f"Camera {self.config.camera_id} connected: {self.status.resolution}")

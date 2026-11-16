@@ -26,6 +26,29 @@
 
 ---
 
+## ✅ Current status (verified November 2026)
+
+An independent end-to-end review found that earlier builds **could not raise a correct fire alert** (stock COCO model, people/cars treated as fire, every alert failing to save, broken desktop IPC). These are fixed and verified — details, evidence and remaining limitations: **[docs/ANALYSIS_AND_PLAN.md](docs/ANALYSIS_AND_PLAN.md)**.
+
+| Area | Status |
+|---|---|
+| Fire/smoke detection | ✅ YOLOv8n fire/smoke model (`rabahdev_best.pt`, D-Fire). 79 % image recall @0.35 on 268 real fire photos; single-frame false alarms 5–7 % on everyday scenes, suppressed by 3-of-5-frame confirmation + per-camera cooldown |
+| Cameras | ✅ RTSP/HTTP network cameras (timeouts, auto-reconnect), video files, synthetic test source; persisted across restarts |
+| Alerting | ✅ In-app P1 siren + banner + desktop notification; email / webhook / Twilio SMS with offline outbox |
+| UI | ✅ Live grid, incident evidence frames, acknowledge, honest health (shows **DETECTION OFFLINE** when not monitoring) |
+| Security | ✅ Localhost-only API, per-launch token, restricted CORS, camera config `0600` |
+| Not yet | ⚠️ Accuracy on *your* scenes is unmeasured — run a site trial; small flames are often missed; no bundled Python sidecar for installers; sunset/fog compensation not implemented; not certified for life safety |
+
+**Quick start**
+```bash
+python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+python run_sentinel.py            # headless API + detection on http://127.0.0.1:8765
+npm install && npm run tauri dev  # desktop app (starts the backend itself)
+pytest tests/                     # 60 tests incl. real-fire-image regression tests
+```
+
+---
+
 ## 📑 Table of Contents
 
 - [Overview & Architecture](#-overview--architecture)

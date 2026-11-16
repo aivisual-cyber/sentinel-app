@@ -22,7 +22,8 @@ class SensorReading:
 class ArduinoBridge:
     """Manages communication with Arduino sensor arrays"""
     
-    SENSOR_PACKET_SIZE = 24  # bytes
+    PACKET_FORMAT = '<BfffffBHB'  # must match the packed C struct in sentinel_sensors.ino
+    SENSOR_PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # 25 bytes (was hard-coded 24 -> every packet failed)
     SYNC_BYTE = 0xAA
     END_BYTE = 0x55
     
@@ -38,6 +39,7 @@ class ArduinoBridge:
         self.last_heartbeat = time.time()
         self.error_count = 0
         self.total_readings = 0
+        self._reconnect_requested = False
         
     def connect(self) -> bool:
         """Establish connection with Arduino"""
@@ -105,6 +107,9 @@ class ArduinoBridge:
                             except ValueError:
                                 buffer.clear()
                 
+                if self._reconnect_requested:
+                    break
+
                 # Check heartbeat
                 if time.time() - self.last_heartbeat > 5:
                     self.send_command("HEARTBEAT")
@@ -116,13 +121,20 @@ class ArduinoBridge:
                 self.logger.error(f"Error in read loop: {e}")
                 self.error_count += 1
                 if self.error_count > 10:
-                    self.reconnect()
+                    # Reconnect from a separate thread: calling reconnect() here made disconnect()
+                    # join the current thread -> RuntimeError
+                    self._reconnect_requested = True
+                    threading.Thread(target=self.reconnect, daemon=True).start()
+                    break
+                time.sleep(0.5)
     
     def _process_packet(self, packet: bytes) -> None:
         """Parse and process sensor data packet"""
         try:
             # Unpack binary data (matching Arduino struct)
-            unpacked = struct.unpack('<BfffffBHB', packet)
+            unpacked = struct.unpack(self.PACKET_FORMAT, bytes(packet))
+            if unpacked[1] <= -998:  # firmware sends -999 when the DHT22 read fails
+                self.logger.debug("DHT22 read failed on device")
             
             reading = SensorReading(
                 timestamp=time.time(),
@@ -159,7 +171,7 @@ class ArduinoBridge:
         if reading.flame_detected:
             self.logger.warning("FLAME DETECTED BY IR SENSOR")
         
-        if reading.temperature > 60:
+        if reading.temperature > 60 and reading.temperature != -999:
             self.logger.warning(f"HIGH TEMPERATURE: {reading.temperature}°C")
     
     def send_command(self, command: str) -> None:
@@ -199,6 +211,8 @@ class ArduinoBridge:
         time.sleep(2)
         
         if self.connect():
+            self.error_count = 0
+            self._reconnect_requested = False
             self.start_monitoring()
             return True
         return False
@@ -207,7 +221,7 @@ class ArduinoBridge:
         """Disconnect from Arduino"""
         self.is_running = False
         
-        if self.read_thread:
+        if self.read_thread and self.read_thread is not threading.current_thread():
             self.read_thread.join(timeout=5)
         
         if self.serial_conn and self.serial_conn.is_open:
@@ -226,4 +240,4 @@ class ArduinoBridge:
             "last_heartbeat": time.time() - self.last_heartbeat
         }
 
-# Refactored for stability and edge performance
+

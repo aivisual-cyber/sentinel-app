@@ -33,6 +33,22 @@ DEFAULT_ORIGINS = "tauri://localhost,http://tauri.localhost,https://tauri.localh
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("SENTINEL_ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",") if o.strip()]
 
 
+API_TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
+
+
+@web.middleware
+async def auth_middleware(request, handler):
+    """Require 'Authorization: Bearer <SENTINEL_API_TOKEN>' when a token is configured.
+    The Tauri shell generates a per-launch token and passes it to the backend it spawns.
+    /api/health stays open so the shell can identify a running backend."""
+    if API_TOKEN and request.method != 'OPTIONS' and request.path != '/api/health':
+        import hmac
+        supplied = request.headers.get('Authorization', '')
+        if not hmac.compare_digest(supplied, f'Bearer {API_TOKEN}'):
+            return web.json_response({'success': False, 'error': 'unauthorized'}, status=401)
+    return await handler(request)
+
+
 def _json_error(message: str, status: int) -> web.Response:
     return web.json_response({'success': False, 'error': message}, status=status)
 
@@ -43,7 +59,7 @@ class SentinelAPIServer:
     def __init__(self, port: int = 8765, host: str = "127.0.0.1"):
         self.port = port
         self.host = host
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[auth_middleware])
         self.sentinel_system: Optional[SentinelSystem] = None
         self.api_handler: Optional[APIServer] = None
         self.backend_task: Optional[asyncio.Task] = None
@@ -54,7 +70,7 @@ class SentinelAPIServer:
 
         self.cors = aiohttp_cors.setup(self.app, defaults={
             origin: aiohttp_cors.ResourceOptions(allow_credentials=False, expose_headers="*",
-                                                 allow_headers=("Content-Type",),
+                                                 allow_headers=("Content-Type", "Authorization"),
                                                  allow_methods=("GET", "POST", "DELETE"))
             for origin in ALLOWED_ORIGINS
         })
@@ -75,6 +91,8 @@ class SentinelAPIServer:
         r.add_delete('/api/cameras/{camera_id}/remove', self.remove_camera)
         r.add_get('/api/status', self.get_system_status)
         r.add_get('/api/metrics', self.get_system_metrics)
+        r.add_get('/api/notifications', self.get_notifications)
+        r.add_post('/api/notifications/test', self.test_notification)
         for route in list(self.app.router.routes()):
             self.cors.add(route)
 
@@ -103,6 +121,7 @@ class SentinelAPIServer:
             'backend_running': self._detection_running(),
             'detector_loaded': bool(s and s.fire_detector),
             'error': self.backend_error or (s.last_detection_error if s else None),
+            'auth_required': bool(API_TOKEN),
         })
 
     async def get_dashboard_data(self, request) -> web.Response:
@@ -271,6 +290,22 @@ class SentinelAPIServer:
                 frames_processed=self.sentinel_system.frames_processed,
                 detections_made=self.sentinel_system.detections_made)
         return web.json_response(metrics)
+
+    async def get_notifications(self, request) -> web.Response:
+        if (err := self._require_backend()):
+            return err
+        notifier = self.sentinel_system.alert_manager.notifier
+        notifier.reload()
+        return web.json_response({'channels': notifier.get_status()})
+
+    async def test_notification(self, request) -> web.Response:
+        if (err := self._require_backend()):
+            return err
+        data = await request.json()
+        notifier = self.sentinel_system.alert_manager.notifier
+        notifier.reload()
+        ok, message = await asyncio.to_thread(notifier.send_test, str(data.get('channel', '')))
+        return web.json_response({'success': ok, 'message': message}, status=200 if ok else 502)
 
     # ----------------------------------------------------------- lifecycle
     async def start_backend_system(self):
