@@ -54,6 +54,7 @@ jobs:
           }
           if (Get-Service SentinelEngine -ErrorAction SilentlyContinue) { throw 'a refused install created a service' }
           'unsafe layouts refused OK'
+          exit 0   # the refused installs leave LASTEXITCODE=1, which would fail this step
 
       - name: Install from bundle (Windows PowerShell 5.1, as the target machine would)
         shell: powershell
