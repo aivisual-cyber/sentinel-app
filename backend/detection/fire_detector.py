@@ -30,11 +30,9 @@ import yaml
 try:
     from .. import paths
     from .rtsp_manager import RTSPManager, CameraConfig
-    from .fire_model_manager import safe_load_yolo
 except ImportError:  # backend/ on sys.path (api_server, tests)
     import paths
     from detection.rtsp_manager import RTSPManager, CameraConfig
-    from detection.fire_model_manager import safe_load_yolo
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +42,9 @@ DEFAULT_CONFIG = {
             'path': 'rabahdev_best.pt',          # relative to SENTINEL_HOME
             'classes': ['fire', 'smoke', 'flame'],  # case-insensitive model class names
             'imgsz': 640,
+            # .onnx models: ONNX Runtime execution providers in priority order, or [auto]
+            # (auto = CUDA -> DirectML -> CPU, whichever is installed and works)
+            'providers': ['auto'],
         },
         'thresholds': {
             'immediate_alert': 0.75,
@@ -179,9 +180,38 @@ class FireDetector:
             raise FileNotFoundError(
                 f"Fire/smoke model not found at {model_path}. Set detection.model.path in "
                 f"{self.config_path}. A COCO model will NOT be substituted: it cannot detect fire.")
-        model = safe_load_yolo(model_path)
-        logger.info(f"Loaded fire model {model_path.name} classes={model.names}")
+        if model_path.suffix.lower() == '.onnx':
+            # ONNX Runtime: no PyTorch needed; GPU via DirectML (Windows, any DX12 GPU) or CUDA
+            try:
+                from .onnx_backend import OnnxYolo
+            except ImportError:
+                from detection.onnx_backend import OnnxYolo
+            model = OnnxYolo(model_path, providers=model_cfg.get('providers') or ['auto'],
+                             imgsz=int(model_cfg.get('imgsz', 640)))
+        else:
+            try:  # PyTorch is imported only when a .pt model is used
+                from .fire_model_manager import safe_load_yolo
+            except ImportError:
+                from detection.fire_model_manager import safe_load_yolo
+            model = safe_load_yolo(model_path)
+            try:
+                import torch
+                model.device_label = (f"GPU via CUDA: {torch.cuda.get_device_name(0)}" if torch.cuda.is_available()
+                                      else 'CPU (PyTorch)')
+            except Exception:
+                model.device_label = 'PyTorch'
+        logger.info(f"Loaded fire model {model_path.name} classes={model.names} on {self.device_of(model)}")
         return model
+
+    @staticmethod
+    def device_of(model) -> str:
+        return getattr(model, 'device', None) if isinstance(getattr(model, 'device', None), str) \
+            else getattr(model, 'device_label', 'unknown')
+
+    @property
+    def inference_info(self) -> dict:
+        return {'backend': getattr(self.model, 'backend', 'pytorch'), 'device': self.device_of(self.model),
+                'model': self.config['detection']['model']['path']}
 
     def _resolve_fire_classes(self) -> set:
         wanted = {c.lower() for c in self.config['detection']['model']['classes']}

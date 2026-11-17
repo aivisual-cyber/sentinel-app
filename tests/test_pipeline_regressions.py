@@ -140,3 +140,33 @@ class TestBatchInference:
         assert batch[1].alert_level == "None" and batch[0].alert_level != "None"
         for b, s in zip(batch, single):
             assert b.max_confidence == pytest.approx(s.max_confidence, abs=0.02)
+
+
+class TestOnnxBackend:
+    """The ONNX Runtime backend (used on Windows/DirectML, no PyTorch) must match PyTorch exactly."""
+
+    @pytest.fixture(scope="class")
+    def pair(self, tmp_path_factory):
+        pytest.importorskip("onnxruntime")
+        if not (REPO / "rabahdev_best.onnx").exists():
+            pytest.skip("ONNX model not present")
+        base = yaml.safe_load((REPO / "config" / "detection_config.yaml.template").read_text())
+        out = []
+        for path in ("rabahdev_best.pt", "rabahdev_best.onnx"):
+            cfg = tmp_path_factory.mktemp("cfg") / "c.yaml"
+            base["detection"]["model"]["path"] = path
+            cfg.write_text(yaml.safe_dump(base))
+            out.append(FireDetector(str(cfg)))
+        return out
+
+    def test_same_results_as_pytorch(self, pair):
+        pt, ox = pair
+        assert ox.inference_info["backend"] == "onnxruntime"
+        frames = [cv2.imread(str(FIXTURES / "fire_1.jpg")), cv2.imread(str(FIXTURES / "fire_2.jpg")),
+                  np.zeros((480, 640, 3), dtype=np.uint8)]
+        for f in frames:
+            a, b = pt.detect_fire(f), ox.detect_fire(f)
+            assert a.alert_level == b.alert_level
+            assert a.max_confidence == pytest.approx(b.max_confidence, abs=1e-3)
+            assert [d.bbox for d in a.detections] == [d.bbox for d in b.detections]
+        assert [r.alert_level for r in pt.detect_batch(frames)] == [r.alert_level for r in ox.detect_batch(frames)]

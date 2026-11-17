@@ -41,7 +41,9 @@ async def auth_middleware(request, handler):
     """Require 'Authorization: Bearer <SENTINEL_API_TOKEN>' when a token is configured.
     The Tauri shell generates a per-launch token and passes it to the backend it spawns.
     /api/health stays open so the shell can identify a running backend."""
-    if API_TOKEN and request.method != 'OPTIONS' and request.path != '/api/health':
+    # Only the API is protected; the static UI (served to the local browser) is public
+    if (API_TOKEN and request.method != 'OPTIONS' and request.path.startswith('/api/')
+            and request.path != '/api/health'):
         import hmac
         supplied = request.headers.get('Authorization', '')
         if not hmac.compare_digest(supplied, f'Bearer {API_TOKEN}'):
@@ -97,6 +99,25 @@ class SentinelAPIServer:
         r.add_post('/api/notifications/test', self.test_notification)
         for route in list(self.app.router.routes()):
             self.cors.add(route)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Serve the built web UI (browser mode: Windows deployments, no Tauri/WebView2 needed)."""
+        candidates = [os.environ.get('SENTINEL_UI_DIR'), paths.SENTINEL_HOME / 'ui',
+                      Path(__file__).resolve().parent.parent / 'ui', Path(__file__).resolve().parent.parent / 'dist']
+        ui = next((Path(c) for c in candidates if c and (Path(c) / 'index.html').is_file()), None)
+        if not ui:
+            self.logger.info("No built UI found (dist/ or ui/); API only")
+            return
+        index = ui / 'index.html'
+
+        async def index_handler(request):
+            return web.FileResponse(index, headers={'Cache-Control': 'no-cache'})
+
+        self.app.router.add_get('/', index_handler)
+        if (ui / 'assets').is_dir():
+            self.app.router.add_static('/assets', ui / 'assets')
+        self.logger.info(f"Web UI served from {ui} at http://{self.host}:{self.port}/")
 
     # ----------------------------------------------------------- helpers
     @property
@@ -129,6 +150,7 @@ class SentinelAPIServer:
             'detector_loaded': bool(s and s.fire_detector),
             'error': self.backend_error or (s.last_detection_error if s else None),
             'auth_required': bool(API_TOKEN),
+            'inference': health.get('inference'),
         })
 
     async def get_dashboard_data(self, request) -> web.Response:
@@ -394,7 +416,9 @@ async def main():
     print("🔥 Starting Sentinel API Server")
     print("⚠️  SUPPLEMENTARY FIRE DETECTION ONLY - NOT A REPLACEMENT FOR CERTIFIED SYSTEMS")
     paths.ensure_dirs()
-    server = SentinelAPIServer(port=int(os.environ.get("SENTINEL_PORT", 8765)))
+    # Default: localhost only. SENTINEL_HOST=0.0.0.0 exposes the token-protected API/UI to the LAN.
+    server = SentinelAPIServer(port=int(os.environ.get("SENTINEL_PORT", 8765)),
+                               host=os.environ.get("SENTINEL_HOST", "127.0.0.1"))
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

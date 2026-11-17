@@ -65,8 +65,7 @@ def main(argv=None):
     cfg = ConfigManager()
     target_fps = cfg.get_system_config().frame_rate
     det = FireDetector(str(cfg.config_path))
-    import torch
-    device = torch.cuda.get_device_name(0) if torch.cuda.is_available() else f"CPU ({os.cpu_count()} threads)"
+    device = det.inference_info['device']
     print(f"Model {det.config['detection']['model']['path']}  imgsz {det.config['detection']['model']['imgsz']}  "
           f"device {device}  target {target_fps} analysed FPS/camera")
     det.detect_batch(frames[:1])  # warm-up
@@ -84,8 +83,8 @@ def main(argv=None):
     cap = max(ok) if ok else 0
     print(f"\nCapacity: up to {cap} camera(s) at {target_fps} analysed FPS each on this machine "
           f"(worst-case added latency per frame ~= one cycle).")
-    if not torch.cuda.is_available():
-        print("No CUDA GPU detected: production sites should use an NVIDIA GPU (see README hardware requirements).")
+    if not str(device).startswith('GPU'):
+        print("Running on CPU: for more cameras use a GPU (Windows: DirectML, any DX12 GPU; Linux: CUDA).")
     if args.json:
         Path(args.json).write_text(json.dumps({'device': device, 'platform': platform.platform(),
                                                'target_fps': target_fps, 'capacity': cap, 'rows': rows}, indent=1))

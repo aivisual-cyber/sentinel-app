@@ -40,12 +40,14 @@ An independent end-to-end review found that earlier builds **could not raise a c
 | Operations | ✅ Always-on systemd service + desktop client, one-command installer, watchdog, heartbeat, health self-assessment — see **[docs/OPERATIONS.md](docs/OPERATIONS.md)** |
 | Site trial | ✅ Operator verdicts per alert → precision & false alarms/day per camera, CSV export; verdicts feed retraining |
 | Model updates | ✅ `scripts/train_model.py`: fine-tune with site false alarms, promote only if better, hot-swap, rollback |
-| Not yet | ⚠️ Accuracy on *your* scenes must be measured in a site trial; small flames are often missed; Windows installer unverified; sunset/fog compensation not implemented; not certified for life safety |
+| Windows (offline) | ✅ USB bundle: no internet, no Python/CUDA/VC++ install needed; Windows services; browser console. GPU via **DirectML on any DirectX 12 GPU (NVIDIA Kepler/GTX 600 → Blackwell/RTX 50, AMD, Intel)** or CPU — see **[deploy/windows/README-WINDOWS.md](deploy/windows/README-WINDOWS.md)** |
+| Not yet | ⚠️ Accuracy on *your* scenes must be measured in a site trial; small flames are often missed; DirectML performance on specific GPUs unmeasured; sunset/fog compensation not implemented; not certified for life safety |
 
 **Quick start**
 ```bash
 python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
 sudo ./scripts/install.sh         # production: systemd service + watchdog (docs/OPERATIONS.md)
+python scripts/build_windows_bundle.py   # offline Windows USB bundle (or download it from CI artifacts)
 python run_sentinel.py            # development: headless API + detection on http://127.0.0.1:8765
 npm install && npm run tauri dev  # desktop app (starts the backend itself)
 pytest tests/                     # test suite incl. real-fire-image regression tests

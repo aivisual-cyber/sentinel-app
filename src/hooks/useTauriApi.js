@@ -19,18 +19,9 @@ const initTauriApi = async () => {
         isAvailable: true
       };
     } else {
-      // Fallback for development mode
-      tauriApi = {
-        invoke: async (command, args) => {
-          console.warn(`Tauri command ${command} called in development mode`);
-          return null;
-        },
-        listen: (event, callback) => {
-          console.warn(`Tauri event ${event} listener registered in development mode`);
-          return () => {};
-        },
-        isAvailable: false
-      };
+      // Browser mode (Windows deployments, dev server): talk to the backend over HTTP
+      const { httpApi } = await import('./httpTransport');
+      tauriApi = httpApi;
     }
   } catch (error) {
     console.error('Failed to initialize Tauri API:', error);

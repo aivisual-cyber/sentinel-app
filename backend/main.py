@@ -230,6 +230,7 @@ class SentinelSystem:
                 issues.append(f"{name} delivery failing ({ch['pending']} pending): {ch['last_error'][:80]}")
         state = 'critical' if critical else ('degraded' if issues else 'healthy')
         return {'state': state, 'issues': critical + issues, 'checked_at': now,
+                'inference': getattr(self.fire_detector, 'inference_info', None),
                 'last_detection_age': round(now - sp.last_detection_time, 1) if sp.last_detection_time else None,
                 'cameras_streaming': len(live), 'cameras_total': len(cams)}
 
@@ -254,6 +255,7 @@ class SentinelSystem:
         return {
             'running': self.is_running,
             'detector_loaded': self.fire_detector is not None,
+            'inference': self.fire_detector.inference_info if self.fire_detector else None,
             'model': getattr(getattr(self.fire_detector, 'model', None), 'ckpt_path', None),
             'active_cameras': sum(1 for c in cams.values() if c['connected']),
             'total_cameras': len(cams),

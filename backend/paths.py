@@ -33,3 +33,22 @@ def resolve(path) -> Path:
 def ensure_dirs() -> None:
     for d in (CONFIG_DIR, DATA_DIR, LOG_DIR, MODELS_DIR, ALERT_FRAMES_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def load_env_file(path=None) -> int:
+    """Load KEY=VALUE lines (secrets, token) from SENTINEL_ENV_FILE without overriding existing env vars.
+    Used by Windows services (one ACL-protected file instead of secrets in service definitions)."""
+    path = path or os.environ.get("SENTINEL_ENV_FILE")
+    if not path or not Path(path).is_file():
+        return 0
+    n = 0
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            n += 1
+    return n

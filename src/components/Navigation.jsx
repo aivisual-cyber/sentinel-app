@@ -107,6 +107,14 @@ const Navigation = ({ currentView, onViewChange, systemStatus }) => {
             status={systemStatus?.backendRunning ? (systemStatus?.cameraNetwork || 'unknown') : 'offline'}
             value={systemStatus?.backendRunning ? `${systemStatus?.cameras || 0} STREAMING` : 'OFFLINE'}
           />
+          <StatusItem
+            label="Inference"
+            status={systemStatus?.inference ? (String(systemStatus.inference.device).startsWith('GPU') ? 'online' : 'warning') : 'unknown'}
+            value={systemStatus?.inference
+              ? (String(systemStatus.inference.device).startsWith('GPU')
+                ? `GPU · ${(String(systemStatus.inference.device).match(/via (\w+)/) || [])[1] || ''}` : 'CPU')
+              : 'UNKNOWN'}
+          />
           <StatusItem 
             label="Alert System" 
             status={systemStatus?.alertSystem || 'unknown'}

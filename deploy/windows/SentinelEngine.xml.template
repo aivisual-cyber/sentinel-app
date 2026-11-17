@@ -1,0 +1,26 @@
+<!-- Sentinel detection engine as a Windows service (WinSW v2). Placeholders are filled by install.ps1. -->
+<service>
+  <id>SentinelEngine</id>
+  <name>Sentinel Fire Detection Engine</name>
+  <description>Sentinel SUPPLEMENTARY fire/smoke detection (camera monitoring and alerts). Not a replacement for certified fire alarm systems.</description>
+  <executable>@INSTALL@\python\python.exe</executable>
+  <arguments>-u -s "@INSTALL@\app\run_sentinel.py"</arguments>
+  <workingdirectory>@DATA@</workingdirectory>
+  <env name="SENTINEL_HOME" value="@DATA@"/>
+  <env name="SENTINEL_ENV_FILE" value="@DATA@\sentinel.env"/>
+  <env name="SENTINEL_UI_DIR" value="@INSTALL@\ui"/>
+  <env name="PYTHONUNBUFFERED" value="1"/>
+  <env name="PYTHONNOUSERSITE" value="1"/>
+  <startmode>Automatic</startmode>
+  <!-- Never give up: restart after every failure -->
+  <onfailure action="restart" delay="5 sec"/>
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>20 sec</stoptimeout>
+  <logpath>@DATA@\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+</service>

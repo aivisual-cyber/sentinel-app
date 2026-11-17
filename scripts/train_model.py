@@ -139,8 +139,12 @@ def build_dataset(args) -> Path:
 # ----------------------------------------------------------------------------- evaluation
 def evaluate(model_path: str, data_yaml: str, budget: float, p4: float) -> dict:
     import cv2
-    from detection.fire_model_manager import safe_load_yolo
-    m = safe_load_yolo(model_path)
+    if str(model_path).lower().endswith('.onnx'):
+        from detection.onnx_backend import OnnxYolo
+        m = OnnxYolo(model_path)
+    else:
+        from detection.fire_model_manager import safe_load_yolo
+        m = safe_load_yolo(model_path)
     keep = {i for i, n in m.names.items() if n.lower() in TARGET}
     root = Path(yaml.safe_load(Path(data_yaml).read_text())['path'])
     scores, labels = [], []
@@ -200,6 +204,11 @@ def promote(candidate: Path, cand: dict, cur: dict, args) -> bool:
         dst = paths.MODELS_DIR / f"fire_smoke_{time.strftime('%Y%m%d_%H%M%S')}.pt"
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(candidate, dst)
+        if str(current_model_and_p4()[0]).lower().endswith('.onnx'):
+            # deployment runs the PyTorch-free ONNX runtime (e.g. Windows/DirectML): ship ONNX
+            sys.path.insert(0, str(ROOT / 'scripts'))
+            from export_onnx import export
+            dst = export(str(dst))
         rel = os.path.relpath(dst, paths.SENTINEL_HOME)
         text = paths.DETECTION_CONFIG.read_text()
         new, n = re.subn(r'(?m)^(\s+path:\s*)\S+', lambda m: m.group(1) + rel, text, count=1)

@@ -601,3 +601,29 @@ Goal: close the three blockers in §11 (unmeasured site performance, packaging, 
 **Production reliance: decide per site, from the trial data.** The remaining uncertainty is model accuracy on each site's scenes — now *measurable* (site trial) and *improvable* (feedback → retrain → gated promotion), rather than assumed.
 
 **Still open:** GPU capacity numbers (benchmark on target hardware), a GPU training run on D-Fire + site negatives, Windows installer (`install.ps1` not updated/verified), multi-user roles/audit of operator identity, sunset/fog compensation.
+
+---
+
+## 13. Round 4 — NVIDIA GPU coverage (GTX → Blackwell) and offline Windows deployment
+
+### Question: can one build use every NVIDIA GPU from the GTX era to Blackwell, on an offline Windows machine?
+
+**With PyTorch/CUDA: not well.** PyTorch's CUDA 12.8 wheels (2.7/2.8) reportedly carry sm_50 (Maxwell) … sm_120 (Blackwell), but they are ~2.5–3 GB, need driver R570+, and newer PyTorch releases are dropping Maxwell/Pascal/Volta. Kepler (GTX 600/700, last driver R470) can never run CUDA 12. ([PyTorch forum: sm_120 support](https://discuss.pytorch.org/t/pytorch-support-for-sm120/216099?page=2), [PyTorch dev-discuss: CUDA 12.6 wheels end, Maxwell/Pascal/Volta dropped](https://dev-discuss.pytorch.org/t/notice-cuda-12-6-wheels-will-no-longer-be-published-from-pytorch-2-15-drops-maxwell-pascal-volta/3432))
+
+**With ONNX Runtime + DirectML: yes.** DirectML runs on any DirectX 12–capable GPU through the normal display driver — no CUDA toolkit/cuDNN, any driver age that supports DX12 — and the `onnxruntime-directml` wheel ships `DirectML.dll` itself. Microsoft has put DirectML in sustained engineering (supported, no new features), which suits a stable deployment. ([ONNX Runtime DirectML EP](https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html), [DirectML overview](https://learn.microsoft.com/windows/ai/directml), [onnxruntime-directml on PyPI](https://pypi.org/project/onnxruntime-directml))
+
+### What was built
+
+| # | Item | Verification |
+|---|---|---|
+| W1 | `backend/detection/onnx_backend.py`: YOLO on ONNX Runtime (providers auto: CUDA → DirectML → CPU, fallback to CPU if a GPU provider fails), Ultralytics-identical letterbox (incl. rect mode) and class-aware NMS | **396/396 real images: identical alert levels, max confidence difference 0.0000 vs PyTorch**; mixed-size batches identical; ONNX ≈ 2× faster on CPU (47 vs 86 ms) |
+| W2 | PyTorch imported only for `.pt` models; inference device reported in health/UI ("Inference: GPU · DirectML / CPU") | Engine from the bundle ran with **no torch installed** (0 torch libraries mapped) |
+| W3 | `scripts/export_onnx.py` (+ automatic ONNX export on model promotion when deployment uses `.onnx`) | max diff 0.0000 |
+| W4 | Browser mode: backend serves the UI; `src/hooks/httpTransport.js` mirrors every Tauri command over HTTP; access key from the shortcut URL, stored, stripped from the address bar | Playwright with no shim: data, alarm, reload persistence, 0 page errors |
+| W5 | `scripts/build_windows_bundle.py`: official CPython (NuGet) + pinned wheels (`requirements-windows.txt`) + **app-local VC++ runtime DLLs** + model + UI + WinSW + scripts + SHA-256 manifest → 340 MB folder / 126 MB zip | PE import analysis of every `.pyd/.dll`: **all imports resolved** (found and fixed: ONNX Runtime needed `msvcp140.dll`/`msvcp140_1.dll`, absent on clean Windows); WinSW is native (no .NET); builder now always rebuilds the UI (a stale `dist/` had shipped) |
+| W6 | `deploy/windows/install.ps1` / `uninstall.ps1` (Windows PowerShell 5.1): offline install/upgrade, access key, ACLs (Administrators + SYSTEM), GPU check, `SentinelEngine` + `SentinelWatchdog` services with restart-on-failure, optional LAN mode + firewall, Edge app-mode shortcut | Manual review (PowerShell parsing on Linux not permitted here; found and fixed an `icacls` inheritance flag on files). **Real-Windows test: CI workflow below** |
+| W7 | `scripts/gpu_check.py` (installer runs it): tries CUDA/DirectML/CPU with the real model, times it | Linux CPU run |
+| W8 | `.github/workflows/windows-bundle.yml`: on Windows Server runner — build, install with PowerShell 5.1, verify services/401/UI/ACL, real fire image → alert, kill engine → service recovers, upgrade keeps key + cameras, uninstall; publishes the zip | see CI run |
+| W9 | Removed the old unverified `scripts/install.ps1`, `test_windows_installer.ps1`, `check_port.ps1` | — |
+
+**Remaining:** DirectML speed on specific GPUs is unmeasured (no GPU here) — run `gpu_check.py`/`benchmark.py` on the target. Kepler support depends on the R470 driver's DX12 path (falls back to CPU if not). Server Core has no browser: use `-ListenLan` and a console on another PC.

@@ -1,0 +1,21 @@
+<!-- Independent health watchdog (WinSW v2): notifies on DOWN / DEGRADED / RECOVERED and restarts a hung engine. -->
+<service>
+  <id>SentinelWatchdog</id>
+  <name>Sentinel Fire Detection Watchdog</name>
+  <description>Checks Sentinel health every 30 s, sends notifications when monitoring is down or degraded, restarts a hung engine.</description>
+  <executable>@INSTALL@\python\python.exe</executable>
+  <arguments>-u -s "@INSTALL@\app\scripts\watchdog.py" --url http://127.0.0.1:@PORT@/api/health --failures 3 --interval 30 --restart-cmd "powershell -NoProfile -NonInteractive -Command Restart-Service SentinelEngine -Force"</arguments>
+  <workingdirectory>@DATA@</workingdirectory>
+  <env name="SENTINEL_HOME" value="@DATA@"/>
+  <env name="SENTINEL_ENV_FILE" value="@DATA@\sentinel.env"/>
+  <env name="PYTHONUNBUFFERED" value="1"/>
+  <env name="PYTHONNOUSERSITE" value="1"/>
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="10 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <logpath>@DATA@\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>2048</sizeThreshold>
+    <keepFiles>3</keepFiles>
+  </log>
+</service>

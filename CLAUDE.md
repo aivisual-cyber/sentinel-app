@@ -109,6 +109,10 @@ sunset_hours: [17, 19]   # Higher thresholds during challenging light
 > client using /etc/sentinel/api_token. Health: /api/health (healthy|degraded|critical + issues); watchdog:
 > scripts/watchdog.py; operator verdicts + site trial: backend/alerts/feedback.py; retraining with gated
 > promotion: scripts/train_model.py; capacity: scripts/benchmark.py. Ops guide: docs/OPERATIONS.md.
+> Inference backends: .pt -> PyTorch/Ultralytics; .onnx -> ONNX Runtime (backend/detection/onnx_backend.py,
+> identical results, no torch; providers auto = CUDA -> DirectML -> CPU). Windows deploys the ONNX path via an
+> offline bundle (scripts/build_windows_bundle.py, deploy/windows/, CI workflow windows-bundle.yml); the backend
+> also serves the web UI (browser mode, src/hooks/httpTransport.js). Export: scripts/export_onnx.py.
 
 ### Original roadmap status (historical)
 

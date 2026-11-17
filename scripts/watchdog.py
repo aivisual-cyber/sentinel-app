@@ -25,6 +25,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'backend'))
 import paths  # noqa: E402
+paths.load_env_file()  # notification secrets from SENTINEL_ENV_FILE
 from alerts.notification_system import ExternalNotifier  # noqa: E402
 
 STATE_FILE = paths.DATA_DIR / 'watchdog_state.json'

@@ -96,6 +96,7 @@ export const useStableSystemStatus = () => {
           current.detectionEngine !== newStatus.detectionEngine ||
           current.backendRunning !== newStatus.backendRunning ||
           JSON.stringify(current.issues || []) !== JSON.stringify(newStatus.issues || []) ||
+          JSON.stringify(current.inference || null) !== JSON.stringify(newStatus.inference || null) ||
           current.alertSystem !== newStatus.alertSystem ||
           Math.abs(current.cameras - newStatus.cameras) > 0 ||
           Math.abs(current.activeAlerts - newStatus.activeAlerts) > 0;
@@ -188,6 +189,7 @@ export const useStableSystemStatus = () => {
         updates.systemHealth = !systemData.backend_running || hs === 'critical' || hs === 'unreachable'
           ? 'critical' : hs === 'degraded' ? 'warning' : 'optimal';
         updates.issues = Array.isArray(systemData.issues) ? systemData.issues : [];
+        updates.inference = systemData.inference || null;
         hasValidData = true;
       }
 

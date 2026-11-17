@@ -47,6 +47,9 @@ def safe_load_yolo(model_path) -> YOLO:
     """Build a YOLO object from a checkpoint loaded with :func:`safe_load_checkpoint`."""
     ckpt = safe_load_checkpoint(model_path)
     net = (ckpt.get('ema') or ckpt['model']).float().eval()
+    if not getattr(net, 'task', None):
+        net.task = 'detect'  # attributes the exporter/predictor expect
+    net.pt_path = str(model_path)
     yolo = YOLO('yolov8n.yaml', task='detect')  # skeleton only; weights replaced below
     yolo.model = net
     yolo.ckpt_path = str(model_path)

@@ -19,6 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / 'backend'))
 if sys.version_info < (3, 10):
     sys.exit("Python 3.10+ required")
 
+import paths  # noqa: E402
+
+paths.load_env_file()  # SENTINEL_ENV_FILE (Windows service) - must run before api_server reads the token
+
 from api_server import main  # noqa: E402
 
 if __name__ == "__main__":

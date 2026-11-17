@@ -55,6 +55,14 @@ Upgrade: `git pull && sudo ./scripts/install.sh` (keeps config, cameras, token, 
 
 Docker alternative: see `docker-compose.yml` (engine + watchdog containers, NVIDIA runtime).
 
+### Windows (offline / air-gapped)
+
+Build once on any internet-connected machine (`python scripts/build_windows_bundle.py`, or download the
+`Sentinel-Windows-x64-offline` artifact from the *Windows offline bundle* GitHub Actions workflow), copy the folder
+to USB, then on the target run `install.ps1` as Administrator. Details, GPU table and troubleshooting:
+[deploy/windows/README-WINDOWS.md](../deploy/windows/README-WINDOWS.md). Services: `SentinelEngine`, `SentinelWatchdog`;
+data: `C:\ProgramData\Sentinel`; console: desktop shortcut (Edge app window, `http://127.0.0.1:8765/`).
+
 ## 4. Cameras
 
 Desktop app → **Surveillance Grid → Add Camera** (or `POST /api/cameras/add`). Use the camera's **sub-stream**

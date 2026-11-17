@@ -20,6 +20,8 @@ pub struct SystemStatus {
     /// healthy | degraded | critical | unreachable (from /api/health)
     pub health_state: String,
     pub issues: Vec<String>,
+    /// {backend, device, model} of the running detector
+    pub inference: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -388,6 +390,7 @@ async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, S
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64(),
+        inference: health.as_ref().and_then(|v| v.get("inference").cloned()).unwrap_or(serde_json::Value::Null),
         health_state,
         issues,
     })
