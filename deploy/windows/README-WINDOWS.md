@@ -2,6 +2,8 @@
 
 > **Supplementary early warning only.** Never a replacement for certified fire alarm systems.
 
+**First time? Follow [WINDOWS_STEP_BY_STEP.md](WINDOWS_STEP_BY_STEP.md)** (download → USB → install → test).
+
 This folder is a complete, **offline** installation: Python, all libraries, the Microsoft VC++ runtime DLLs,
 the fire/smoke model, the operator console and the service wrapper are included. The target machine needs
 **no internet, no Python, no CUDA, no Visual C++ Redistributable**.

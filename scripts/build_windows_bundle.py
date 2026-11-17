@@ -140,6 +140,7 @@ def main(argv=None):
         shutil.copy(ROOT / f, app / f)
     (app / 'docs').mkdir()
     shutil.copy(ROOT / 'docs' / 'OPERATIONS.md', app / 'docs' / 'OPERATIONS.md')
+    shutil.copy(ROOT / 'docs' / 'WINDOWS_STEP_BY_STEP.md', out / 'WINDOWS_STEP_BY_STEP.md')
 
     # 5. UI, model, service wrapper, installer
     build_ui(out / 'ui')

@@ -40,7 +40,7 @@ An independent end-to-end review found that earlier builds **could not raise a c
 | Operations | ✅ Always-on systemd service + desktop client, one-command installer, watchdog, heartbeat, health self-assessment — see **[docs/OPERATIONS.md](docs/OPERATIONS.md)** |
 | Site trial | ✅ Operator verdicts per alert → precision & false alarms/day per camera, CSV export; verdicts feed retraining |
 | Model updates | ✅ `scripts/train_model.py`: fine-tune with site false alarms, promote only if better, hot-swap, rollback |
-| Windows (offline) | ✅ USB bundle: no internet, no Python/CUDA/VC++ install needed; Windows services; browser console. GPU via **DirectML on any DirectX 12 GPU (NVIDIA Kepler/GTX 600 → Blackwell/RTX 50, AMD, Intel)** or CPU — see **[deploy/windows/README-WINDOWS.md](deploy/windows/README-WINDOWS.md)** |
+| Windows (offline) | ✅ USB bundle: no internet, no Python/CUDA/VC++ install needed; Windows services; browser console. GPU via **DirectML on any DirectX 12 GPU (NVIDIA Kepler/GTX 600 → Blackwell/RTX 50, AMD, Intel)** or CPU — step-by-step: **[docs/WINDOWS_STEP_BY_STEP.md](docs/WINDOWS_STEP_BY_STEP.md)** |
 | Not yet | ⚠️ Accuracy on *your* scenes must be measured in a site trial; small flames are often missed; DirectML performance on specific GPUs unmeasured; sunset/fog compensation not implemented; not certified for life safety |
 
 **Quick start**
