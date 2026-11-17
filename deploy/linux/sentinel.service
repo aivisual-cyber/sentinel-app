@@ -1,0 +1,33 @@
+# Sentinel supplementary fire detection - always-on detection service.
+# Runs independently of the desktop UI (closing the UI never stops monitoring).
+[Unit]
+Description=Sentinel supplementary fire detection (camera monitoring + alerts)
+Wants=network-online.target
+After=network-online.target
+# Keep restarting forever: a fire-monitoring service must never give up
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+SupplementaryGroups=video
+EnvironmentFile=/etc/sentinel/sentinel.env
+ExecStart=@PREFIX@/venv/bin/python -u @PREFIX@/app/run_sentinel.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@STATE@
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

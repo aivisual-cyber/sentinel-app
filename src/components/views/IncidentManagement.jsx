@@ -11,7 +11,32 @@ const LEVELS = {
   P4: { bg: 'safety', text: 'LOGGED EVENT' },
 };
 
-const AlertItem = ({ alert, onAcknowledge, onEvidence, isProcessing }) => {
+const VERDICTS = {
+  fire: { label: 'REAL FIRE', cls: 'bg-red-600 text-white' },
+  false_alarm: { label: 'FALSE ALARM', cls: 'bg-gray-500 text-white' },
+  test: { label: 'TEST', cls: 'bg-blue-600 text-white' },
+};
+
+const VerdictButtons = ({ alert, onVerdict, busy }) => {
+  if (alert.verdict) {
+    const v = VERDICTS[alert.verdict] || { label: alert.verdict, cls: 'bg-gray-600 text-white' };
+    return <span className={`px-3 py-1 rounded-full text-xs font-bold ${v.cls}`}>{v.label}</span>;
+  }
+  return (
+    <div className="flex items-center gap-1" title="Your verdict builds the site trial report and the training set">
+      <button disabled={busy} onClick={() => onVerdict(alert.id, 'fire')}
+        className="px-2 py-2 rounded-lg text-xs font-bold bg-red-700 hover:bg-red-600 text-white">REAL FIRE</button>
+      <button disabled={busy} onClick={() => onVerdict(alert.id, 'false_alarm')}
+        className="px-2 py-2 rounded-lg text-xs font-bold bg-gray-600 hover:bg-gray-500 text-white">FALSE ALARM</button>
+      <button disabled={busy} onClick={() => onVerdict(alert.id, 'test')}
+        className="px-2 py-2 rounded-lg text-xs font-bold bg-gray-800 hover:bg-gray-700 text-gray-200">TEST</button>
+    </div>
+  );
+};
+
+VerdictButtons.propTypes = { alert: PropTypes.object.isRequired, onVerdict: PropTypes.func.isRequired, busy: PropTypes.bool };
+
+const AlertItem = ({ alert, onAcknowledge, onEvidence, onVerdict, isProcessing }) => {
   const config = LEVELS[alert.alert_level] || { bg: 'gray', text: 'UNKNOWN' };
   const when = new Date(alert.timestamp * 1000);
   const active = alert.status === 'active';
@@ -41,14 +66,15 @@ const AlertItem = ({ alert, onAcknowledge, onEvidence, isProcessing }) => {
           >
             <ImageIcon className="w-4 h-4" /> EVIDENCE
           </button>
-          <button
+          <VerdictButtons alert={alert} onVerdict={onVerdict} busy={isProcessing} />
+          {active && <button
             onClick={() => onAcknowledge(alert.id)}
             disabled={!active || isProcessing}
             className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${active && !isProcessing
               ? 'bg-fire-500 hover:bg-fire-600 text-white' : 'bg-gray-600 text-gray-400 cursor-not-allowed'}`}
           >
-            {isProcessing ? 'PROCESSING...' : (active ? 'ACKNOWLEDGE' : 'ACKNOWLEDGED')}
-          </button>
+            {isProcessing ? 'PROCESSING...' : 'ACKNOWLEDGE'}
+          </button>}
         </div>
       </div>
     </div>
@@ -59,6 +85,7 @@ AlertItem.propTypes = {
   alert: PropTypes.object.isRequired,
   onAcknowledge: PropTypes.func.isRequired,
   onEvidence: PropTypes.func.isRequired,
+  onVerdict: PropTypes.func.isRequired,
   isProcessing: PropTypes.bool,
 };
 
@@ -106,9 +133,26 @@ const IncidentManagement = ({ alerts, onAcknowledgeAlert, connectionStatus }) =>
   const [evidence, setEvidence] = useState(null);
   const notifications = useNotifications();
   const { execute: getAlertFrame } = useTauriCommand('get_alert_frame');
+  const { execute: setAlertVerdict } = useTauriCommand('set_alert_verdict');
+  const [verdicts, setVerdicts] = useState({}); // optimistic until the next poll
 
-  const active = useMemo(() => alerts.filter(a => a.status === 'active'), [alerts]);
-  const history = useMemo(() => alerts.filter(a => a.status !== 'active'), [alerts]);
+  const merged = useMemo(() => alerts.map(a => (verdicts[a.id]
+    ? { ...a, verdict: verdicts[a.id], status: a.status === 'active' ? 'acknowledged' : a.status } : a)), [alerts, verdicts]);
+  const active = useMemo(() => merged.filter(a => a.status === 'active'), [merged]);
+  const history = useMemo(() => merged.filter(a => a.status !== 'active'), [merged]);
+
+  const giveVerdict = async (alertId, verdict) => {
+    setProcessing(prev => new Set([...prev, alertId]));
+    const r = await setAlertVerdict({ alert_id: alertId, verdict });
+    setProcessing(prev => { const s = new Set(prev); s.delete(alertId); return s; });
+    if (r && r.success) {
+      setVerdicts(v => ({ ...v, [alertId]: verdict }));
+      notifications.showSuccess(verdict === 'false_alarm'
+        ? 'Marked false alarm – saved as a training example' : `Marked ${verdict.replace('_', ' ')}`);
+    } else {
+      notifications.showError('Could not save verdict (backend unreachable?)');
+    }
+  };
   const shown = tab === 'active' ? active : history;
 
   const acknowledge = async (alertId) => {
@@ -139,7 +183,7 @@ const IncidentManagement = ({ alerts, onAcknowledgeAlert, connectionStatus }) =>
     <div className="p-6">
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-white mb-2">INCIDENT MANAGEMENT</h2>
-        <p className="text-gray-400">Verify each alert on camera, then acknowledge. Last 24 hours.</p>
+        <p className="text-gray-400">Verify each alert on camera, then record what it was. Verdicts drive the site trial report and model retraining. Last 24 hours.</p>
       </div>
 
       <div className="command-panel rounded-xl p-6">
@@ -173,6 +217,7 @@ const IncidentManagement = ({ alerts, onAcknowledgeAlert, connectionStatus }) =>
             <p className="text-center text-gray-500 py-12">No acknowledged alerts in the last 24 hours.</p>) :
             shown.map(alert => (
               <AlertItem key={alert.id} alert={alert} onAcknowledge={acknowledge} onEvidence={openEvidence}
+                onVerdict={giveVerdict}
                 isProcessing={processing.has(alert.id)} />
             ))}
         </div>

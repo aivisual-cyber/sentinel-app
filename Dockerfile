@@ -33,8 +33,8 @@ COPY run_sentinel.py rabahdev_best.pt ./
 ENV SENTINEL_HOME=/app SENTINEL_PORT=8765
 
 # Healthcheck
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD python3 -c "import json,sys,urllib.request; s=json.load(urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=4))['status']; sys.exit(1 if s == 'critical' else 0)" || exit 1
 
 EXPOSE 8765
 

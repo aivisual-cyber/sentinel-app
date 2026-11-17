@@ -8,6 +8,7 @@ SUPPLEMENTARY early-warning only - never a replacement for certified fire alarm 
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -53,13 +54,16 @@ class TemporalConfirmer:
 
 
 def setup_logging() -> logging.Logger:
+    from logging.handlers import RotatingFileHandler
     paths.LOG_DIR.mkdir(parents=True, exist_ok=True)  # must exist before the FileHandler
     root = logging.getLogger()
     if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[logging.StreamHandler(), logging.FileHandler(paths.LOG_DIR / 'sentinel.log', mode='a')],
+            # 24/7 service: bounded log size (10 MB x 5)
+            handlers=[logging.StreamHandler(),
+                      RotatingFileHandler(paths.LOG_DIR / 'sentinel.log', maxBytes=10 * 1024 * 1024, backupCount=5)],
             force=True,
         )
     return logging.getLogger(__name__)
@@ -83,6 +87,7 @@ class SentinelSystem:
         self.frames_processed = 0
         self.detections_made = 0
         self.last_detection_error = None
+        self.last_heartbeat_ok = None
         self.logger.info("Sentinel System initialized")
 
     async def start(self, install_signals: bool = True):
@@ -115,9 +120,17 @@ class SentinelSystem:
         self.logger.info(f"Camera stream processing started at {system.frame_rate} FPS per camera")
 
     def _detection_callback(self, frames: Dict[str, Any]):
-        for camera_id, frame in frames.items():
+        ids = list(frames)
+        try:
+            # One batched inference for all cameras with a new frame this cycle
+            results = self.fire_detector.detect_batch([frames[c] for c in ids])
+        except Exception as e:
+            self.last_detection_error = str(e)
+            self.logger.error(f"Batch detection failed: {e}")
+            return
+        for camera_id, result in zip(ids, results):
+            frame = frames[camera_id]
             try:
-                result: DetectionResult = self.fire_detector.detect_fire(frame)
                 self.frames_processed += 1
                 det = self.config_manager.get_detection_config()
                 self.confirmer.window, self.confirmer.min_hits = det.temporal_window, det.temporal_min_hits
@@ -129,8 +142,8 @@ class SentinelSystem:
                 alert = self.alert_manager.create_alert(camera_id, result)
                 if alert:  # None when suppressed by the per-camera cooldown
                     frame_path = self.fire_detector.save_alert_frame(frame, result.detections, alert.id)
-                    if frame_path:
-                        self.alert_manager.attach_frame(alert, frame_path)
+                    raw_path = self.fire_detector.save_raw_frame(frame, alert.id)
+                    self.alert_manager.attach_frame(alert, frame_path, raw_path)
                     self.logger.warning(f"Alert {alert.id} ({alert.alert_level.value}) camera={camera_id} "
                                         f"confidence={alert.confidence:.2f}")
                 self.last_detection_error = None
@@ -142,6 +155,7 @@ class SentinelSystem:
         self.logger.info("Sentinel system running - monitoring cameras for fire detection")
         last_stats = time.time()
         last_cleanup = 0.0
+        last_heartbeat = 0.0
         while self.is_running:
             try:
                 now = time.time()
@@ -152,6 +166,10 @@ class SentinelSystem:
                     retention = self.config_manager.get_system_config().log_retention_days
                     self.alert_manager.database.cleanup_old_records(retention, frames_dir=paths.ALERT_FRAMES_DIR)
                     last_cleanup = now
+                hb_every = float((self.alert_manager.notifier.config.get('heartbeat') or {}).get('interval_seconds', 60))
+                if now - last_heartbeat >= hb_every:
+                    await self._send_heartbeat()
+                    last_heartbeat = now
                 if self.config_manager.reload_config():
                     self.logger.info("Configuration reloaded")
                 await asyncio.sleep(1)
@@ -172,6 +190,64 @@ class SentinelSystem:
                 'frames_processed': self.frames_processed, 'uptime_seconds': time.time() - self.start_time})
         except Exception as e:
             self.logger.error(f"Failed to log system stats: {e}")
+
+    STALL_SECONDS = 15.0
+
+    def get_health(self) -> Dict[str, Any]:
+        """Self-assessment for /api/health, the UI and the external watchdog.
+
+        critical: detection is not protecting anything (not running / loop stalled / frames not analysed)
+        degraded: partially protecting (a camera down or frozen, alert delivery failing, no cameras)
+        """
+        now = time.time()
+        critical, issues = [], []
+        sp = self.stream_processor
+        if not (self.is_running and self.fire_detector and sp and sp.is_processing):
+            critical.append('detection engine not running')
+            return {'state': 'critical', 'issues': critical, 'checked_at': now}
+        if now - sp.last_loop_time > self.STALL_SECONDS:
+            critical.append(f'detection loop stalled for {now - sp.last_loop_time:.0f}s')
+        cams = sp.get_camera_status()
+        live = [c for c in cams.values() if c['connected'] and now - (c['last_frame_time'] or 0) < self.STALL_SECONDS]
+        if not cams:
+            issues.append('no cameras configured')
+        for cid, c in cams.items():
+            if not c['connected']:
+                issues.append(f"camera {cid} not streaming" + (f" ({c['last_error']})" if c['last_error'] else ''))
+            elif now - (c['last_frame_time'] or 0) > self.STALL_SECONDS:
+                issues.append(f"camera {cid} frozen (no new frame for {now - c['last_frame_time']:.0f}s)")
+        stall = max(self.STALL_SECONDS, 5 * sp.process_interval)
+        if live and sp.last_detection_time and now - sp.last_detection_time > stall:
+            critical.append(f'no frames analysed for {now - sp.last_detection_time:.0f}s')
+        if cams and not live:
+            critical.append('no camera is streaming')
+        cycle = getattr(sp, 'cycle_seconds', 0.0)
+        if live and cycle > 1.2 * sp.process_interval:
+            issues.append(f"detection overloaded: ~{1 / cycle:.1f} analysed FPS per camera "
+                          f"(target {1 / sp.process_interval:.1f}); add a GPU or reduce cameras")
+        for name, ch in self.alert_manager.notifier.get_status().items():
+            if ch['enabled'] and ch['last_error'] and ch['pending']:
+                issues.append(f"{name} delivery failing ({ch['pending']} pending): {ch['last_error'][:80]}")
+        state = 'critical' if critical else ('degraded' if issues else 'healthy')
+        return {'state': state, 'issues': critical + issues, 'checked_at': now,
+                'last_detection_age': round(now - sp.last_detection_time, 1) if sp.last_detection_time else None,
+                'cameras_streaming': len(live), 'cameras_total': len(cams)}
+
+    async def _send_heartbeat(self):
+        """Dead-man's switch: ping an external monitor (healthchecks.io, Uptime Kuma push, ...) only while
+        detection is actually working. If Sentinel or the whole PC dies, the monitor alerts someone."""
+        hb = self.alert_manager.notifier.config.get('heartbeat') or {}
+        url = hb.get('url') or os.environ.get(hb.get('url_env', ''), '')
+        if not (hb.get('enabled') and url):
+            return
+        if self.get_health()['state'] == 'critical':
+            return  # stay silent so the external monitor raises the alarm
+        try:
+            import requests
+            await asyncio.to_thread(requests.get, url, timeout=10)
+            self.last_heartbeat_ok = time.time()
+        except Exception as e:
+            self.logger.warning(f"Heartbeat ping failed: {e}")
 
     def get_status(self) -> Dict[str, Any]:
         cams = self.stream_processor.get_camera_status() if self.stream_processor else {}

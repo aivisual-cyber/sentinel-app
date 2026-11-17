@@ -95,6 +95,7 @@ export const useStableSystemStatus = () => {
           current.systemHealth !== newStatus.systemHealth ||
           current.detectionEngine !== newStatus.detectionEngine ||
           current.backendRunning !== newStatus.backendRunning ||
+          JSON.stringify(current.issues || []) !== JSON.stringify(newStatus.issues || []) ||
           current.alertSystem !== newStatus.alertSystem ||
           Math.abs(current.cameras - newStatus.cameras) > 0 ||
           Math.abs(current.activeAlerts - newStatus.activeAlerts) > 0;
@@ -182,7 +183,11 @@ export const useStableSystemStatus = () => {
         // Health comes from the backend's real /api/health probe (via Rust get_system_status)
         updates.detectionEngine = systemData.backend_running ? 'online' : 'offline';
         updates.alertSystem = systemData.backend_running ? 'ready' : 'offline';
-        updates.systemHealth = systemData.backend_running ? 'optimal' : 'critical';
+        // Backend self-assessment: critical = not monitoring, degraded = partially monitoring
+        const hs = systemData.health_state;
+        updates.systemHealth = !systemData.backend_running || hs === 'critical' || hs === 'unreachable'
+          ? 'critical' : hs === 'degraded' ? 'warning' : 'optimal';
+        updates.issues = Array.isArray(systemData.issues) ? systemData.issues : [];
         hasValidData = true;
       }
 

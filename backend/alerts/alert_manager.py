@@ -38,8 +38,10 @@ LEVEL_RANK = {'P4': 1, 'P2': 2, 'P1': 3}
 
 try:
     from .notification_system import ExternalNotifier
+    from . import feedback
 except ImportError:
     from alerts.notification_system import ExternalNotifier
+    from alerts import feedback
 
 class AlertLevel(Enum):
     P1 = "P1"  # Immediate alert
@@ -58,6 +60,7 @@ class Alert:
     status: str = "active"  # active, acknowledged, resolved
     notes: str = ""
     frame_path: Optional[str] = None  # Path to saved frame with bounding boxes
+    verdict: Optional[str] = None     # operator verdict: fire | false_alarm | test
     
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization"""
@@ -72,8 +75,8 @@ class Alert:
         # Create a copy to avoid modifying the original
         clean_data = data.copy()
         
-        # Remove database-specific fields that aren't part of the Alert dataclass
-        clean_data.pop('created_at', None)
+        # Keep only dataclass fields (the table has extra columns: created_at, verdict_at, ...)
+        clean_data = {k: v for k, v in clean_data.items() if k in cls.__dataclass_fields__}
         
         # Convert field types
         clean_data['alert_level'] = AlertLevel(clean_data['alert_level'])
@@ -114,6 +117,9 @@ class AlertDatabase:
             """)
             
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(timestamp DESC)")
+            conn.commit()
+        feedback.migrate(self.db_path)  # operator verdict / ack-time / raw-frame columns
+        with sqlite3.connect(self.db_path) as conn:
 
             # System logs table
             conn.execute("""
@@ -345,9 +351,21 @@ class AlertManager:
             row = conn.execute("SELECT frame_path, status FROM alerts WHERE id = ?", (alert_id,)).fetchone()
         return {'frame_path': row[0], 'status': row[1]} if row else None
 
-    def attach_frame(self, alert: Alert, frame_path: str) -> None:
+    def attach_frame(self, alert: Alert, frame_path: Optional[str], raw_frame_path: Optional[str] = None) -> None:
+        # Targeted UPDATE: re-saving with INSERT OR REPLACE would reset verdict/ack columns
         alert.frame_path = frame_path
-        self.database.save_alert(alert)
+        with sqlite3.connect(self.database.db_path) as conn:
+            conn.execute("UPDATE alerts SET frame_path = ?, raw_frame_path = ? WHERE id = ?",
+                         (frame_path, raw_frame_path, alert.id))
+
+    def set_verdict(self, alert_id: str, verdict: str, notes: str = "") -> Dict[str, Any]:
+        return feedback.set_verdict(self.database.db_path, alert_id, verdict, notes)
+
+    def trial_report(self, days: float = 7.0) -> Dict[str, Any]:
+        return feedback.trial_report(self.database.db_path, days)
+
+    def trial_csv(self, days: float = 7.0) -> str:
+        return feedback.trial_csv(self.database.db_path, days)
     
     def _process_alerts(self):
         """Process alerts in background thread"""
@@ -436,7 +454,8 @@ class AlertManager:
                     'alert_level': alert.alert_level.value,
                     'confidence': alert.confidence,
                     'status': alert.status,
-                    'has_frame': alert.frame_path is not None
+                    'has_frame': alert.frame_path is not None,
+                    'verdict': alert.verdict
                 }
                 for alert in recent_alerts
             ],
@@ -455,9 +474,10 @@ class AlertManager:
             with sqlite3.connect(self.database.db_path) as conn:
                 cursor = conn.execute("""
                     UPDATE alerts 
-                    SET status = 'acknowledged', notes = ?
+                    SET status = 'acknowledged', notes = ?,
+                        acknowledged_at = COALESCE(acknowledged_at, ?)
                     WHERE id = ?
-                """, (notes, alert_id))
+                """, (notes, time.time(), alert_id))
                 rows_affected = cursor.rowcount
                 conn.commit()
             

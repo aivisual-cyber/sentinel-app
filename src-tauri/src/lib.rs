@@ -17,6 +17,9 @@ pub struct SystemStatus {
     pub backend_running: bool,
     pub python_pid: Option<u32>,
     pub last_update: f64,
+    /// healthy | degraded | critical | unreachable (from /api/health)
+    pub health_state: String,
+    pub issues: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -24,8 +27,28 @@ pub struct AppState {
     pub python_process: Arc<Mutex<Option<Child>>>,
     pub api_base_url: String,
     pub client: reqwest::Client,
-    /// Per-launch API token passed to the spawned backend and sent on every request
+    /// API token sent on every request (service token, or per-launch token in dev mode)
     pub api_token: String,
+    /// true when attaching to an installed always-on service (never spawn a backend then)
+    pub service_mode: bool,
+}
+
+/// Token of an installed Sentinel service, if this machine has one.
+/// Order: SENTINEL_API_TOKEN, SENTINEL_TOKEN_FILE, /etc/sentinel/api_token, %ProgramData%\Sentinel\api_token
+fn service_token() -> Option<String> {
+    if let Ok(t) = std::env::var("SENTINEL_API_TOKEN") {
+        if !t.trim().is_empty() { return Some(t.trim().to_string()); }
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(f) = std::env::var("SENTINEL_TOKEN_FILE") { candidates.push(f.into()); }
+    candidates.push("/etc/sentinel/api_token".into());
+    if let Ok(pd) = std::env::var("ProgramData") {
+        candidates.push(std::path::Path::new(&pd).join("Sentinel").join("api_token"));
+    }
+    candidates.iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.trim().to_string())
+        .find(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
 }
 
 /// 256-bit random token from the OS-seeded SipHash keys of std's RandomState
@@ -41,7 +64,10 @@ fn generate_token() -> String {
 
 impl AppState {
     pub fn new() -> Self {
-        let api_token = generate_token();
+        let (api_token, service_mode) = match service_token() {
+            Some(t) => (t, true),
+            None => (generate_token(), false),
+        };
         let mut headers = reqwest::header::HeaderMap::new();
         let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_token))
             .expect("token is ASCII hex");
@@ -53,12 +79,22 @@ impl AppState {
             client: reqwest::Client::builder().default_headers(headers).build()
                 .expect("failed to build HTTP client"),
             api_token,
+            service_mode,
         }
     }
 }
 
 // Internal function for backend startup (used in setup and command)
 async fn start_python_backend_internal(state: Arc<AppState>) -> Result<bool, String> {
+    // Production: detection runs as an always-on service; the app is only a client.
+    if state.service_mode {
+        let url = format!("{}/api/health", state.api_base_url);
+        return match state.client.get(&url).timeout(Duration::from_secs(3)).send().await {
+            Ok(_) => { println!("Attached to Sentinel service"); Ok(true) }
+            Err(e) => Err(format!("Sentinel service not reachable ({}). Check: systemctl status sentinel", e)),
+        };
+    }
+
     let python_process = state.python_process.clone();
     
     // Check if already running
@@ -332,11 +368,18 @@ async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, S
     };
     // Backend counts as running only if detection reports healthy (works for externally started backends too)
     let url = format!("{}/api/health", state.api_base_url);
-    let backend_running = match state.client.get(&url).timeout(Duration::from_secs(2)).send().await {
-        Ok(r) => r.json::<serde_json::Value>().await.ok()
-            .and_then(|v| v.get("backend_running").and_then(|b| b.as_bool())).unwrap_or(false),
-        Err(_) => false,
+    let health = match state.client.get(&url).timeout(Duration::from_secs(2)).send().await {
+        Ok(r) => r.json::<serde_json::Value>().await.ok(),
+        Err(_) => None,
     };
+    let backend_running = health.as_ref()
+        .and_then(|v| v.get("backend_running").and_then(|b| b.as_bool())).unwrap_or(false);
+    let health_state = health.as_ref()
+        .and_then(|v| v.get("status").and_then(|s| s.as_str())).unwrap_or("unreachable").to_string();
+    let issues: Vec<String> = health.as_ref()
+        .and_then(|v| v.get("issues").and_then(|i| i.as_array()))
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["Sentinel backend unreachable".to_string()]);
 
     Ok(SystemStatus {
         backend_running,
@@ -345,6 +388,8 @@ async fn get_system_status(state: State<'_, AppState>) -> Result<SystemStatus, S
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64(),
+        health_state,
+        issues,
     })
 }
 
@@ -559,6 +604,44 @@ async fn api_get(state: &AppState, path: &str) -> Result<serde_json::Value, Stri
     Ok(data)
 }
 
+async fn api_post(state: &AppState, path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let url = format!("{}{}", state.api_base_url, path);
+    let response = state.client.post(&url).json(&body).timeout(Duration::from_secs(15)).send().await
+        .map_err(|e| format!("Request to {} failed: {}", path, e))?;
+    let status = response.status();
+    let data: serde_json::Value = response.json().await
+        .map_err(|e| format!("Invalid response from {}: {}", path, e))?;
+    if !status.is_success() {
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("API error").to_string());
+    }
+    Ok(data)
+}
+
+/// Operator verdict on an alert: "fire" | "false_alarm" | "test"
+#[tauri::command(rename_all = "snake_case")]
+async fn set_alert_verdict(state: State<'_, AppState>, alert_id: String, verdict: String,
+                           notes: Option<String>) -> Result<serde_json::Value, String> {
+    api_post(&state, &format!("/api/alerts/{}/verdict", alert_id),
+             serde_json::json!({ "verdict": verdict, "notes": notes.unwrap_or_default() })).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn get_trial_report(state: State<'_, AppState>, days: Option<f64>) -> Result<serde_json::Value, String> {
+    api_get(&state, &format!("/api/report?days={}", days.unwrap_or(7.0))).await
+}
+
+/// Raw alert log as CSV text (the UI saves it as a file)
+#[tauri::command(rename_all = "snake_case")]
+async fn export_trial_csv(state: State<'_, AppState>, days: Option<f64>) -> Result<String, String> {
+    let url = format!("{}/api/report?days={}&format=csv", state.api_base_url, days.unwrap_or(30.0));
+    let response = state.client.get(&url).timeout(Duration::from_secs(30)).send().await
+        .map_err(|e| format!("Export failed: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("Export failed: HTTP {}", response.status()));
+    }
+    response.text().await.map_err(|e| format!("Export failed: {}", e))
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn get_alert_frame(state: State<'_, AppState>, alert_id: String) -> Result<serde_json::Value, String> {
     api_get(&state, &format!("/api/alerts/{}/frame", alert_id)).await
@@ -647,7 +730,10 @@ pub fn run() {
             get_system_metrics,
             get_alert_frame,
             get_notifications,
-            test_notification
+            test_notification,
+            set_alert_verdict,
+            get_trial_report,
+            export_trial_csv
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

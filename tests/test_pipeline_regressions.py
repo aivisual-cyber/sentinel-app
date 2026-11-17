@@ -127,3 +127,16 @@ class TestRealFireDetection:
 
     def test_blank_frame_raises_nothing(self, detector):
         assert detector.detect_fire(np.zeros((480, 640, 3), dtype=np.uint8)).alert_level == "None"
+
+
+class TestBatchInference:
+    def test_batch_matches_single_frame_results_in_order(self):
+        det = FireDetector(str(REPO / "config" / "detection_config.yaml.template"))
+        frames = [cv2.imread(str(FIXTURES / "fire_1.jpg")), np.zeros((480, 640, 3), dtype=np.uint8),
+                  cv2.imread(str(FIXTURES / "fire_2.jpg"))]
+        batch = det.detect_batch(frames)
+        single = [det.detect_fire(f) for f in frames]
+        assert [r.alert_level for r in batch] == [r.alert_level for r in single]
+        assert batch[1].alert_level == "None" and batch[0].alert_level != "None"
+        for b, s in zip(batch, single):
+            assert b.max_confidence == pytest.approx(s.max_confidence, abs=0.02)

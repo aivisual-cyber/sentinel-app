@@ -206,6 +206,12 @@ class ExternalNotifier:
     # ------------------------------------------------------------ channels
     def _text(self, alert: dict) -> tuple:
         site = self.config.get('site_name', 'Sentinel')
+        if alert.get('kind') == 'system':  # watchdog / health messages, not fire alerts
+            subject = f"[SENTINEL SYSTEM] {alert.get('title', 'status change')} - {site}"
+            body = (f"{alert.get('message', '')}\nSite: {site}\nTime: "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(alert.get('timestamp', time.time()))))}\n\n"
+                    "While Sentinel is down or degraded it is NOT providing supplementary fire monitoring.")
+            return subject, body
         lvl = alert.get('alert_level')
         word = {'P1': 'FIRE ALERT', 'P2': 'Possible fire - verify', 'P4': 'Fire/smoke logged'}.get(lvl, 'Alert')
         ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(alert.get('timestamp', time.time()))))

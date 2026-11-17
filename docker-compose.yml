@@ -1,3 +1,7 @@
+# Sentinel supplementary fire detection - container deployment (NVIDIA GPU).
+#   cp config/notifications.yaml.template config/notifications.yaml   # optional external alerts
+#   export SENTINEL_API_TOKEN=$(python3 -c 'import secrets;print(secrets.token_hex(32))')
+#   docker compose up -d
 services:
   sentinel-engine:
     build:
@@ -5,14 +9,19 @@ services:
       dockerfile: Dockerfile
     container_name: sentinel-engine
     restart: unless-stopped
-    network_mode: "host"
+    network_mode: "host"            # reach RTSP cameras on the LAN; API binds 127.0.0.1:8765
     volumes:
       - ./config:/app/config        # writable: cameras/threshold changes are saved here
-      - ./data:/app/data
+      - ./data:/app/data            # alerts DB, alert frames, feedback dataset
       - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=INFO
+      - SENTINEL_HOME=/app
+      - SENTINEL_API_TOKEN=${SENTINEL_API_TOKEN:?set SENTINEL_API_TOKEN}
+      - SENTINEL_SMTP_PASSWORD=${SENTINEL_SMTP_PASSWORD:-}
+      - SENTINEL_WEBHOOK_URL=${SENTINEL_WEBHOOK_URL:-}
+      - SENTINEL_TWILIO_TOKEN=${SENTINEL_TWILIO_TOKEN:-}
+      - SENTINEL_HEARTBEAT_URL=${SENTINEL_HEARTBEAT_URL:-}
     deploy:
       resources:
         reservations:
@@ -20,3 +29,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # Independent health check: notifies when the engine is down, stalled or degraded
+  sentinel-watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel-watchdog
+    restart: unless-stopped
+    network_mode: "host"
+    command: ["python3", "scripts/watchdog.py", "--failures", "3", "--interval", "30"]
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+    environment:
+      - SENTINEL_HOME=/app
+      - SENTINEL_SMTP_PASSWORD=${SENTINEL_SMTP_PASSWORD:-}
+      - SENTINEL_WEBHOOK_URL=${SENTINEL_WEBHOOK_URL:-}
+      - SENTINEL_TWILIO_TOKEN=${SENTINEL_TWILIO_TOKEN:-}

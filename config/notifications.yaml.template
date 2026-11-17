@@ -6,6 +6,14 @@
 site_name: "Main warehouse"
 max_age_hours: 24
 
+# Dead-man's switch: Sentinel pings this URL every interval ONLY while detection is working.
+# Configure the monitor (healthchecks.io, Uptime Kuma "push", Cronitor, ...) to alert you when pings stop
+# - this catches a dead PC, power loss or network loss that Sentinel itself cannot report.
+heartbeat:
+  enabled: false
+  url_env: SENTINEL_HEARTBEAT_URL   # or url: https://hc-ping.com/<uuid>
+  interval_seconds: 60
+
 channels:
   email:
     enabled: false

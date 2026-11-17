@@ -51,6 +51,7 @@ export const useStableAlertSystem = () => {
         confidence: alert.confidence || 0,
         status: alert.status || 'active',  // backend sends status: active | acknowledged | resolved
         has_frame: !!alert.has_frame,
+        verdict: alert.verdict || null,
         location: alert.location || 'Unknown',
         description: alert.description || `Alert from ${alert.camera_id || 'Unknown'}`
       };

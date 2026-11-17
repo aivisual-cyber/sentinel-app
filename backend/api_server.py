@@ -83,6 +83,8 @@ class SentinelAPIServer:
         r.add_post('/api/threshold', self.update_threshold)
         r.add_post('/api/acknowledge', self.acknowledge_alert)
         r.add_get('/api/alerts/{alert_id}/frame', self.get_alert_frame)
+        r.add_post('/api/alerts/{alert_id}/verdict', self.set_alert_verdict)
+        r.add_get('/api/report', self.get_trial_report)
         r.add_get('/api/cameras', self.get_camera_feeds)
         r.add_get('/api/cameras/{camera_id}/frame', self.get_camera_frame)
         r.add_post('/api/cameras/discover', self.discover_cameras)
@@ -115,10 +117,15 @@ class SentinelAPIServer:
     # ----------------------------------------------------------- routes
     async def health_check(self, request) -> web.Response:
         s = self.sentinel_system
+        health = s.get_health() if s else {'state': 'critical', 'issues': ['starting']}
+        if self.backend_error:
+            health = {'state': 'critical', 'issues': [f'backend failed: {self.backend_error}']}
         return web.json_response({
-            'status': 'healthy' if self._detection_running() else 'degraded',
+            'status': health['state'],          # healthy | degraded | critical
+            'issues': health['issues'],
             'timestamp': time.time(),
-            'backend_running': self._detection_running(),
+            # True only while frames are actually being analysed (not merely "process alive")
+            'backend_running': self._detection_running() and health['state'] != 'critical',
             'detector_loaded': bool(s and s.fire_detector),
             'error': self.backend_error or (s.last_detection_error if s else None),
             'auth_required': bool(API_TOKEN),
@@ -177,6 +184,36 @@ class SentinelAPIServer:
         return web.json_response({
             'alert_id': alert_id, 'frame': base64.b64encode(frame_path.read_bytes()).decode(),
             'timestamp': row[1], 'camera_id': row[2], 'confidence': row[3], 'detections': row[4], 'format': 'jpeg'})
+
+    async def set_alert_verdict(self, request) -> web.Response:
+        """Operator verdict: fire | false_alarm | test (also acknowledges the alert)."""
+        if (err := self._require_backend()):
+            return err
+        data = await request.json()
+        try:
+            result = await asyncio.to_thread(self.sentinel_system.alert_manager.set_verdict,
+                                             request.match_info['alert_id'], str(data.get('verdict', '')),
+                                             str(data.get('notes', ''))[:500])
+        except KeyError:
+            return _json_error('Alert not found', 404)
+        except ValueError as e:
+            return _json_error(str(e), 400)
+        return web.json_response({'success': True, **result})
+
+    async def get_trial_report(self, request) -> web.Response:
+        """Site-trial metrics from operator verdicts. ?days=7&format=csv for the raw alert log."""
+        if (err := self._require_backend()):
+            return err
+        try:
+            days = min(max(float(request.query.get('days', 7)), 0.04), 365)
+        except ValueError:
+            return _json_error('days must be a number', 400)
+        am = self.sentinel_system.alert_manager
+        if request.query.get('format') == 'csv':
+            text = await asyncio.to_thread(am.trial_csv, days)
+            return web.Response(text=text, content_type='text/csv',
+                                headers={'Content-Disposition': f'attachment; filename="sentinel_trial_{int(days)}d.csv"'})
+        return web.json_response(await asyncio.to_thread(am.trial_report, days))
 
     async def get_camera_feeds(self, request) -> web.Response:
         if (err := self._require_backend()):

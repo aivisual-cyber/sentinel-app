@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTauriCommand } from '../../hooks/useTauriApi';
+import SiteTrialPanel from '../shared/SiteTrialPanel';
 
 const PerformanceMetric = ({ label, value, color }) => (
   <div>
@@ -269,6 +270,8 @@ const AnalyticsCenter = ({ connectionStatus }) => {
           </div>
         )}
       </div>
+
+      <SiteTrialPanel />
       
       <div className="grid grid-cols-2 gap-6">
         <div className="command-panel rounded-xl p-6">

@@ -143,6 +143,28 @@ class FireDetector:
         self.config['detection']['thresholds'] = new['detection']['thresholds']
         self.config['detection']['temporal'] = new['detection']['temporal']
         logger.info(f"Detection thresholds reloaded: {self.config['detection']['thresholds']}")
+        if new['detection']['model'] != self.config['detection']['model']:
+            self._swap_model(new['detection']['model'])
+        return True
+
+    def _swap_model(self, model_cfg: dict) -> bool:
+        """Hot-swap the model after a promotion (scripts/train_model.py). A model that fails to load
+        or has no fire/smoke classes is rejected and the current one keeps running."""
+        old_cfg = self.config['detection']['model']
+        try:
+            self.config['detection']['model'] = model_cfg
+            new_model = self._load_model()
+            wanted = {c.lower() for c in model_cfg['classes']}
+            ids = {i for i, n in new_model.names.items() if n.lower() in wanted}
+            if not ids:
+                raise ValueError(f"model classes {new_model.names} contain none of {sorted(wanted)}")
+        except Exception as e:
+            self.config['detection']['model'] = old_cfg
+            logger.error(f"Model swap rejected, keeping {old_cfg['path']}: {e}")
+            return False
+        with self._infer_lock:
+            self.model, self.fire_class_ids = new_model, ids
+        logger.warning(f"Detection model hot-swapped to {model_cfg['path']}")
         return True
 
     @property
@@ -171,32 +193,39 @@ class FireDetector:
     # --------------------------------------------------------------- inference
     def detect_fire(self, frame: np.ndarray) -> DetectionResult:
         """Detect fire/smoke in a single BGR frame."""
+        return self.detect_batch([frame])[0]
+
+    def detect_batch(self, frames: List[np.ndarray]) -> List[DetectionResult]:
+        """Detect fire/smoke in several frames with ONE inference call (one frame per camera per cycle).
+        On a GPU this is much faster than per-frame calls; results are in input order."""
+        if not frames:
+            return []
         start = time.time()
         self.maybe_reload_config()
-        self.frame_count += 1
         min_conf = float(self.thresholds['log_only'])
         with self._infer_lock:  # Ultralytics models are not thread-safe
-            results = self.model(frame, verbose=False, conf=min_conf,
+            results = self.model(list(frames), verbose=False, conf=min_conf,
                                  imgsz=int(self.config['detection']['model'].get('imgsz', 640)))
-
-        detections: List[Detection] = []
-        for result in results:
-            if result.boxes is None:
-                continue
-            for box in result.boxes:
-                class_id = int(box.cls[0])
-                confidence = float(box.conf[0])
-                class_name = str(self.model.names[class_id])
-                if class_id in self.fire_class_ids and self._is_fire_related(class_name, confidence):
-                    x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
-                    detections.append(Detection(confidence, (x1, y1, x2, y2), class_name, time.time()))
-
-        max_confidence = max((d.confidence for d in detections), default=0.0)
         latency_ms = (time.time() - start) * 1000
         if latency_ms > self.config['system']['detection_latency_target'] * 1000:
-            logger.warning(f"Detection latency {latency_ms:.0f} ms exceeds target")
-        return DetectionResult(self.frame_count, time.time(), detections, max_confidence,
-                               self._determine_alert_level(max_confidence), latency_ms)
+            logger.warning(f"Detection latency {latency_ms:.0f} ms for {len(frames)} frame(s) exceeds target")
+
+        out = []
+        for result in results:
+            self.frame_count += 1
+            detections: List[Detection] = []
+            if result.boxes is not None:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
+                    class_name = str(self.model.names[class_id])
+                    if class_id in self.fire_class_ids and self._is_fire_related(class_name, confidence):
+                        x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
+                        detections.append(Detection(confidence, (x1, y1, x2, y2), class_name, time.time()))
+            max_confidence = max((d.confidence for d in detections), default=0.0)
+            out.append(DetectionResult(self.frame_count, time.time(), detections, max_confidence,
+                                       self._determine_alert_level(max_confidence), latency_ms))
+        return out
 
     def _is_fire_related(self, class_name: str, confidence: float) -> bool:
         """Exact (case-insensitive) match against configured fire/smoke class names."""
@@ -242,6 +271,17 @@ class FireDetector:
             return None
 
     save_alert_frame = _save_alert_frame
+
+    def save_raw_frame(self, frame: np.ndarray, alert_id: str) -> Optional[str]:
+        """Save the unannotated frame (used for the operator-feedback training dataset)."""
+        try:
+            paths.ALERT_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+            filepath = paths.ALERT_FRAMES_DIR / f"{alert_id}_raw.jpg"
+            cv2.imwrite(str(filepath), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            return str(filepath)
+        except Exception as e:
+            logger.error(f"Failed to save raw frame: {e}")
+            return None
 
     # ------------------------------------------------- legacy standalone mode
     @property

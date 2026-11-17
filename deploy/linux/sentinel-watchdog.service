@@ -1,0 +1,11 @@
+# Independent health check: notifies (email/webhook/SMS) when Sentinel is down, stalled or degraded,
+# and restarts a hung service that systemd alone would not restart.
+[Unit]
+Description=Sentinel watchdog (health check + notification)
+After=sentinel.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sentinel/sentinel.env
+ExecStart=@PREFIX@/venv/bin/python @PREFIX@/app/scripts/watchdog.py --once --failures 3 --restart-cmd "systemctl restart sentinel.service"
+TimeoutStartSec=150

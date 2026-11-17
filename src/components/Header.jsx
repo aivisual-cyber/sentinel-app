@@ -132,13 +132,20 @@ const Header = ({ systemStatus, alertCount, isRefreshing, isStale }) => {
       {/* Right Side - System Status and Time */}
       <div className="flex items-center space-x-6">
         {/* System Status */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2" title={(systemStatus?.issues || []).join('\n') || 'No issues reported'}>
           <StatusIcon className="w-4 h-4 text-gray-400" />
           <div className={clsx('w-3 h-3 rounded-full', statusConfig.dotClass)} />
-          <span className={clsx('text-sm font-command font-semibold hidden sm:block', statusConfig.textClass)}>
-            {statusConfig.text}
-            {isStale && <span className="ml-1 text-xs opacity-60">(CACHED)</span>}
-          </span>
+          <div className="hidden sm:flex flex-col leading-tight">
+            <span className={clsx('text-sm font-command font-semibold', statusConfig.textClass)}>
+              {statusConfig.text}
+              {isStale && <span className="ml-1 text-xs opacity-60">(CACHED)</span>}
+            </span>
+            {systemStatus?.issues?.length > 0 && (
+              <span className="text-xs text-gray-400 max-w-xs truncate">
+                {systemStatus.issues[0]}{systemStatus.issues.length > 1 ? ` (+${systemStatus.issues.length - 1})` : ''}
+              </span>
+            )}
+          </div>
           {isRefreshing && (
             <div className="w-2 h-2 bg-accent-500 rounded-full animate-pulse ml-1" title="Refreshing..." />
           )}

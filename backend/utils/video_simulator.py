@@ -225,6 +225,9 @@ class StreamProcessor:
         self._last_seen: Dict[str, int] = {}
         self._last_processed: Dict[str, float] = {}
         self.frames_processed = 0
+        self.last_loop_time = time.time()       # heartbeat of the processing thread
+        self.last_detection_time = 0.0          # when a frame was last analysed
+        self.cycle_seconds = 0.0                # EMA of one detection cycle (all cameras)
         self.logger = logging.getLogger(__name__)
 
     def setup_test_cameras(self):
@@ -264,10 +267,17 @@ class StreamProcessor:
             frames = self._new_frames()
             if self.detection_callback and frames:
                 try:
+                    t0 = time.time()
                     self.detection_callback(frames)
+                    dt = time.time() - t0
+                    self._cycles = getattr(self, '_cycles', 0) + 1
+                    if self._cycles > 3:  # ignore model warm-up cycles
+                        self.cycle_seconds = dt if not self.cycle_seconds else 0.8 * self.cycle_seconds + 0.2 * dt
                     self.frames_processed += len(frames)
+                    self.last_detection_time = time.time()
                 except Exception as e:
                     self.logger.error(f"Detection callback error: {e}")
+            self.last_loop_time = time.time()
             time.sleep(0.05)
 
     def get_camera_status(self) -> dict:
