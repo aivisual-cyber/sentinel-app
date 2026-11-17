@@ -54,6 +54,32 @@ foreach ($p in @('python\python.exe', 'app\run_sentinel.py', 'ui\index.html', 'm
     if (-not (Test-Path (Join-Path $Bundle $p))) { Fail "Bundle is incomplete: missing $p" }
 }
 
+# ------------------------------------------------------------------ install locations must be safe
+function Full($p) { [IO.Path]::GetFullPath($p).TrimEnd('\') }
+function Inside($child, $parent) { ($child + '\').StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase) }
+$InstallDir = Full $InstallDir; $DataDir = Full $DataDir; $BundleDir = Full $Bundle
+foreach ($pair in @(@('InstallDir', $InstallDir), @('DataDir', $DataDir))) {
+    if ($pair[1] -match '^[A-Za-z]:$') { Fail "$($pair[0]) cannot be a drive root ($($pair[1])\). Use a folder, e.g. $($pair[1])\Sentinel" }
+}
+if ((Inside $InstallDir $BundleDir) -or (Inside $BundleDir $InstallDir)) {
+    Fail "InstallDir ($InstallDir) must be separate from the unpacked bundle ($BundleDir). Example: -InstallDir E:\Sentinel -DataDir E:\SentinelData"
+}
+if ((Inside $DataDir $InstallDir) -or (Inside $InstallDir $DataDir) -or (Inside $DataDir $BundleDir)) {
+    Fail "DataDir ($DataDir) must be outside InstallDir and the bundle: upgrades and uninstall replace the program folder. Example: -InstallDir E:\Sentinel -DataDir E:\SentinelData"
+}
+$Marker = Join-Path $InstallDir 'sentinel-install.json'
+$isSentinel = (Test-Path $Marker) -or (Test-Path (Join-Path $InstallDir 'app\run_sentinel.py'))
+if ((Test-Path $InstallDir) -and -not $isSentinel -and (Get-ChildItem -Force $InstallDir | Select-Object -First 1)) {
+    Fail "InstallDir $InstallDir already contains other files. Choose a new or empty folder, e.g. $InstallDir\Sentinel"
+}
+foreach ($d in @($InstallDir, $DataDir)) {
+    try { $vol = Get-Volume -DriveLetter ((Split-Path -Qualifier $d).TrimEnd(':')) -ErrorAction Stop } catch { $vol = $null }
+    if ($vol -and $vol.FileSystem -and $vol.FileSystem -notin @('NTFS', 'ReFS')) {
+        Fail "$d is on a $($vol.FileSystem) drive. Use an NTFS drive (needed to protect the access key and camera passwords), e.g. C:"
+    }
+    if ($vol -and $vol.DriveType -eq 'Removable') { Warn "$d is on a removable drive: detection stops if it is unplugged. Prefer an internal disk." }
+}
+
 # ------------------------------------------------------------------ stop running services (upgrade)
 foreach ($svc in @('SentinelWatchdog', 'SentinelEngine')) {
     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -71,6 +97,9 @@ foreach ($d in @('python', 'app', 'ui', 'tools')) {
 }
 Copy-Item (Join-Path $Bundle 'uninstall.ps1') $InstallDir -Force
 Copy-Item (Join-Path $Bundle 'README-WINDOWS.md') $InstallDir -Force -ErrorAction SilentlyContinue
+# Marker: identifies this folder as a Sentinel install and tells uninstall.ps1 where the data lives
+$markerJson = @{ InstallDir = $InstallDir; DataDir = $DataDir; Port = $Port; InstalledAt = (Get-Date).ToString('s') } | ConvertTo-Json
+[IO.File]::WriteAllText($Marker, $markerJson, (New-Object Text.UTF8Encoding($false)))
 $Python = Join-Path $InstallDir 'python\python.exe'
 
 # ------------------------------------------------------------------ data dir (SENTINEL_HOME)

@@ -37,6 +37,24 @@ jobs:
         run: |
           python scripts/build_windows_bundle.py --out build/Sentinel-Windows-x64
 
+      - name: Installer refuses unsafe folder layouts (changes nothing)
+        shell: powershell
+        run: |
+          Set-Location build\Sentinel-Windows-x64
+          $bundle = (Get-Location).Path
+          $cases = @(
+            @{ InstallDir = $bundle; DataDir = 'C:\SentinelCiData' },                 # program into the bundle folder
+            @{ InstallDir = 'C:\SentinelCi'; DataDir = 'C:\SentinelCi\DATA' },        # data inside program folder
+            @{ InstallDir = 'C:\'; DataDir = 'C:\SentinelCiData' },                   # drive root
+            @{ InstallDir = $env:windir; DataDir = 'C:\SentinelCiData' }              # folder with other files
+          )
+          foreach ($c in $cases) {
+            powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoShortcut -InstallDir $c.InstallDir -DataDir $c.DataDir
+            if ($LASTEXITCODE -ne 1) { throw "installer accepted unsafe layout: $($c.InstallDir) / $($c.DataDir)" }
+          }
+          if (Get-Service SentinelEngine -ErrorAction SilentlyContinue) { throw 'a refused install created a service' }
+          'unsafe layouts refused OK'
+
       - name: Install from bundle (Windows PowerShell 5.1, as the target machine would)
         shell: powershell
         run: |
