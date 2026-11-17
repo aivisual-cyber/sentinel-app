@@ -8,7 +8,7 @@ detection:
     imgsz: 640
 
   # Calibrated for rabahdev_best.pt on 268 real fire images vs 130 everyday negatives
-  # (docs/ANALYSIS_AND_PLAN.md §4/§9). The old 0.95/0.85/0.70 values could never fire.
+  # (docs/ANALYSIS_AND_PLAN.md sec. 4/sec. 9). The old 0.95/0.85/0.70 values could never fire.
   thresholds:
     immediate_alert: 0.75    # P1 - single-frame false-alarm rate measured 0.8 %
     review_queue: 0.55       # P2 - human verification

@@ -17,6 +17,13 @@ import sys
 import time
 from pathlib import Path
 
+# Windows services / redirected output use a legacy code page: never crash on a non-ASCII character
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent

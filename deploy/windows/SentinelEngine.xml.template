@@ -10,6 +10,9 @@
   <env name="SENTINEL_ENV_FILE" value="@DATA@\sentinel.env"/>
   <env name="SENTINEL_UI_DIR" value="@INSTALL@\ui"/>
   <env name="PYTHONUNBUFFERED" value="1"/>
+  <!-- UTF-8 mode: service output is not a console (cp1252 would crash on non-ASCII); also file I/O -->
+  <env name="PYTHONUTF8" value="1"/>
+  <env name="PYTHONIOENCODING" value="utf-8:replace"/>
   <env name="PYTHONNOUSERSITE" value="1"/>
   <startmode>Automatic</startmode>
   <!-- Never give up: restart after every failure -->

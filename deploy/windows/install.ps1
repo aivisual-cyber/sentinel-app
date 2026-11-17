@@ -123,12 +123,19 @@ foreach ($p in @($envFile, $tokenFile)) {          # files: no inheritance flags
     & icacls $p /inheritance:r /grant:r "*S-1-5-32-544:F" "*S-1-5-18:F" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { Warn "Could not restrict permissions on $p" }
 }
-& icacls (Join-Path $DataDir 'config') /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /T /Q | Out-Null
-if ($LASTEXITCODE -ne 0) { Warn "Could not restrict permissions on $DataDir\config" }
+# Directory: Administrators + SYSTEM only, inherited by everything inside. Then make existing files
+# inherit (a recursive /grant with (OI)(CI) on files leaves them with an unusable ACL).
+$cfgDir = Join-Path $DataDir 'config'
+& icacls $cfgDir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { Warn "Could not restrict permissions on $cfgDir" }
+& icacls (Join-Path $cfgDir '*') /reset /T /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { Warn "Could not reset permissions inside $cfgDir" }
 
 # ------------------------------------------------------------------ GPU check (offline)
 Say "Checking inference device (GPU via DirectML / CUDA, else CPU)"
 $env:SENTINEL_HOME = $DataDir
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8:replace'
 & $Python -s (Join-Path $InstallDir 'app\scripts\gpu_check.py')
 if ($LASTEXITCODE -ne 0) { Fail "The detection runtime could not run on this machine (see output above and $LogFile)." }
 

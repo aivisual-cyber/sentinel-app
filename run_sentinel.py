@@ -14,6 +14,13 @@ import asyncio
 import sys
 from pathlib import Path
 
+# Windows services / redirected output use a legacy code page: never crash on a non-ASCII character
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'backend'))
 
 if sys.version_info < (3, 10):
