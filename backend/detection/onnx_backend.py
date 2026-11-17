@@ -126,7 +126,11 @@ class OnnxYolo:
         if wanted == ['auto'] or 'auto' in [str(p).lower() for p in wanted]:
             wanted = [p for p in PREFERRED_PROVIDERS if p != 'TensorrtExecutionProvider']
         chosen = [p for p in wanted if p in avail] or ['CPUExecutionProvider']
+        # Warnings such as "some nodes were not assigned to the preferred execution providers" are
+        # normal (shape ops run on CPU by design) and only alarm operators: log errors only.
+        ort.set_default_logger_severity(3)
         so = ort.SessionOptions()
+        so.log_severity_level = 3
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         if 'DmlExecutionProvider' in chosen:
             # DirectML requirements (onnxruntime docs): no memory pattern, sequential execution
@@ -162,7 +166,8 @@ class OnnxYolo:
                  'TensorrtExecutionProvider': 'TensorRT'}.get(self.provider, self.provider)
         return f"GPU via {label}" + (f": {', '.join(names)}" if names else '')
 
-    def __call__(self, frames, verbose: bool = False, conf: float = 0.25, imgsz: Optional[int] = None, **_):
+    def __call__(self, frames, verbose: bool = False, conf: float = 0.25, imgsz: Optional[int] = None,
+                 iou: Optional[float] = None, **_):
         if isinstance(frames, np.ndarray):
             frames = [frames]
         size = int(imgsz or self.imgsz)
@@ -174,9 +179,10 @@ class OnnxYolo:
             metas.append((r, left, top, f.shape[1], f.shape[0]))
         x = np.ascontiguousarray(np.stack(batch), dtype=np.float32) / 255.0
         out = self.session.run(None, {self.input_name: x})[0]  # (B, 4+nc, anchors)
-        return [self._post(out[i], metas[i], conf) for i in range(len(frames))]
+        nms_iou = float(self.iou if iou is None else iou)
+        return [self._post(out[i], metas[i], conf, nms_iou) for i in range(len(frames))]
 
-    def _post(self, pred: np.ndarray, meta, conf_thr: float) -> _Result:
+    def _post(self, pred: np.ndarray, meta, conf_thr: float, nms_iou: float) -> _Result:
         pred = pred.T  # (anchors, 4+nc)
         scores = pred[:, 4:]
         cls = scores.argmax(1)
@@ -187,7 +193,7 @@ class OnnxYolo:
         b, cls, conf = pred[m, :4], cls[m], conf[m]
         xyxy = np.concatenate([b[:, :2] - b[:, 2:] / 2, b[:, :2] + b[:, 2:] / 2], axis=1)
         offset = cls[:, None] * 7680.0  # class-aware NMS
-        keep = _nms(xyxy + offset, conf, self.iou)[: self.max_det]
+        keep = _nms(xyxy + offset, conf, nms_iou)[: self.max_det]
         r, left, top, w, h = meta
         boxes = []
         for i in keep:

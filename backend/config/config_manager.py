@@ -5,6 +5,7 @@ Handles YAML configuration loading, validation, and real-time updates
 
 import yaml
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
@@ -43,6 +44,8 @@ class SystemConfig:
     max_concurrent_cameras: int = 10
     rtsp_timeout: int = 5
     frame_rate: int = 2
+    burst_frame_rate: float = 5.0      # analysed FPS for a camera while it shows a fire/smoke candidate
+    burst_hold_seconds: float = 10.0
     detection_latency_target: float = 2.0
     log_retention_days: int = 30
     video_retention_hours: int = 48
@@ -67,6 +70,7 @@ class ConfigManager:
         self.logger = logging.getLogger(__name__)
         self._config_cache = {}
         self._last_modified = 0
+        self._reload_lock = threading.Lock()  # detection thread, API and main loop all reload
         
         self.logger.info(f"Config manager using path: {self.config_path.absolute()}")
         
@@ -75,6 +79,10 @@ class ConfigManager:
     
     def reload_config(self) -> bool:
         """Reload configuration from file if changed"""
+        with self._reload_lock:
+            return self._reload_locked()
+
+    def _reload_locked(self) -> bool:
         try:
             if not self.config_path.exists():
                 self.logger.warning(f"Config file not found: {self.config_path}")
@@ -151,6 +159,8 @@ class ConfigManager:
             max_concurrent_cameras=cameras_raw.get('max_concurrent', 10),
             rtsp_timeout=cameras_raw.get('rtsp_timeout', 5),
             frame_rate=cameras_raw.get('frame_rate', 2),
+            burst_frame_rate=float(cameras_raw.get('burst_frame_rate', 5)),
+            burst_hold_seconds=float(cameras_raw.get('burst_hold_seconds', 10)),
             detection_latency_target=system_raw.get('detection_latency_target', 2.0),
             log_retention_days=system_raw.get('log_retention_days', 30),
             video_retention_hours=system_raw.get('video_retention_hours', 48)

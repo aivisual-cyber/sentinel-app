@@ -7,25 +7,22 @@ each delivering a frame per cycle, and compares per-frame inference with the bat
 service uses. Reports the per-camera analysed FPS achievable, the cycle latency (time for one frame
 from every camera), and the largest camera count that meets the configured analysis rate.
 
+  sentinel benchmark                                   # Windows: bundled Python, installed config
   python scripts/benchmark.py                          # uses tests/fixtures images, 1..16 cameras
-  python scripts/benchmark.py --images /path/to/frames --cameras 1 4 8 16 --seconds 10
+  python scripts/benchmark.py --images D:\\frames --cameras 1 4 8 16 --seconds 10
+  python scripts/benchmark.py --images D:\\clip.mp4    # frames sampled from a video
 """
 
 import argparse
-import glob
 import json
-import os
 import platform
 import statistics
 import sys
 import time
 from pathlib import Path
 
-import cv2
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / 'backend'))
-import paths  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tooling import ROOT, find_model, load_frames, where  # noqa: E402  (sets up paths, UTF-8 output)
 from config.config_manager import ConfigManager  # noqa: E402
 from detection.fire_detector import FireDetector  # noqa: E402
 
@@ -52,19 +49,22 @@ def run(det, frames, n, seconds, batched):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--images', default=str(ROOT / 'tests' / 'fixtures'))
+    ap.add_argument('--images', default=None, help='image folder, one image, or a video (default: tests/fixtures)')
+    ap.add_argument('--model', default=None, help='model file (default: the one the service uses)')
     ap.add_argument('--cameras', type=int, nargs='+', default=[1, 2, 4, 8, 16])
     ap.add_argument('--seconds', type=float, default=8)
     ap.add_argument('--json', help='write results to this file')
     args = ap.parse_args(argv)
 
-    files = sorted(glob.glob(os.path.join(args.images, '*.jp*g')) + glob.glob(os.path.join(args.images, '*.png')))
-    if not files:
-        sys.exit(f"No images in {args.images}")
-    frames = [cv2.imread(f) for f in files]
+    frames, _ = load_frames(args.images)
+    if not frames:
+        sys.exit(f"No images or video frames found in {args.images or ROOT / 'tests' / 'fixtures'} "
+                 f"(supported: .jpg .jpeg .png .bmp .webp, or a video file)")
     cfg = ConfigManager()
     target_fps = cfg.get_system_config().frame_rate
-    det = FireDetector(str(cfg.config_path))
+    model = find_model(args.model)
+    print(where())
+    det = FireDetector(str(cfg.config_path), model_path=str(model))
     device = det.inference_info['device']
     print(f"Model {det.config['detection']['model']['path']}  imgsz {det.config['detection']['model']['imgsz']}  "
           f"device {device}  target {target_fps} analysed FPS/camera")

@@ -77,9 +77,10 @@ receiver; alerts raised while the network is down are retried.
 | Symptom | Check |
 |---|---|
 | Console shows DETECTION OFFLINE | `Get-Service SentinelEngine`; logs in `C:\ProgramData\Sentinel\logs` (`SentinelEngine.err.log`, `sentinel.log`) |
-| Inference shows CPU on a GPU machine | `C:\Program Files\Sentinel\python\python.exe "C:\Program Files\Sentinel\app\scripts\gpu_check.py"` – update the display driver; check `dxdiag` shows DirectX 12 |
+| Inference shows CPU on a GPU machine | `sentinel gpu` and `sentinel parity` (new PowerShell window) – update the display driver; check `dxdiag` shows DirectX 12. The installer uses only engines that pass the accuracy check |
 | Camera `connecting` | test the RTSP URL in VLC from the same machine; firewall between PC and camera |
 | Forgot access key | `C:\ProgramData\Sentinel\api_token` (Administrators only) |
-| Capacity | `...\python.exe "...\app\scripts\benchmark.py"` – cameras at 2 analysed FPS on this machine |
+| Capacity | `sentinel benchmark` – cameras at 2 analysed FPS on this machine |
+| Accuracy | `sentinel parity` – each engine vs the original PyTorch model on reference images (PASS/FAIL) |
 
 Operating procedures (site trial, verdicts, retraining): `app\docs\OPERATIONS.md`.

@@ -96,6 +96,7 @@ foreach ($d in @('python', 'app', 'ui', 'tools')) {
     if ($LASTEXITCODE -ge 8) { Fail "Copying $d failed (robocopy exit $LASTEXITCODE)" }
 }
 Copy-Item (Join-Path $Bundle 'uninstall.ps1') $InstallDir -Force
+Copy-Item (Join-Path $Bundle 'sentinel.cmd') $InstallDir -Force
 Copy-Item (Join-Path $Bundle 'README-WINDOWS.md') $InstallDir -Force -ErrorAction SilentlyContinue
 # Marker: identifies this folder as a Sentinel install and tells uninstall.ps1 where the data lives
 $markerJson = @{ InstallDir = $InstallDir; DataDir = $DataDir; Port = $Port; InstalledAt = (Get-Date).ToString('s') } | ConvertTo-Json
@@ -168,6 +169,35 @@ $env:PYTHONIOENCODING = 'utf-8:replace'
 & $Python -s (Join-Path $InstallDir 'app\scripts\gpu_check.py')
 if ($LASTEXITCODE -ne 0) { Fail "The detection runtime could not run on this machine (see output above and $LogFile)." }
 
+# ------------------------------------------------------------------ accuracy check (offline)
+# Every engine (DirectML GPU, CUDA, CPU) vs the original PyTorch model's answers on reference images.
+# Engines that differ are not used: detection.model.providers is restricted to those that pass.
+Say "Checking accuracy: each engine vs the original PyTorch model (reference images)"
+$parityJson = Join-Path $DataDir ("logs\parity-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".json")
+& $Python -s (Join-Path $InstallDir 'app\scripts\parity_check.py') --json $parityJson
+$parityExit = $LASTEXITCODE
+$cfgText = Get-Content $detCfg -Raw
+$managed = '(?m)^(\s+)providers:.*# set by installer.*$'
+if ($parityExit -eq 1 -and (Test-Path $parityJson)) {
+    $rep = Get-Content $parityJson -Raw | ConvertFrom-Json
+    $passing = @($rep.engines | Where-Object { $_.status -eq 'PASS' } | ForEach-Object { $_.provider })
+    if ($passing.Count -eq 0) { Fail "No inference engine on this machine reproduces the reference model. Report: $parityJson" }
+    Warn "Some engines differ from the reference model; detection will use only: $($passing -join ', ') (report: $parityJson)"
+    $line = "providers: [" + ($passing -join ', ') + "]   # set by installer: engines that passed the accuracy check"
+    if ($cfgText -match $managed) { $cfgText = $cfgText -replace $managed, "`${1}$line" }
+    elseif ($cfgText -notmatch '(?m)^\s+providers:') { $cfgText = $cfgText -replace '(?m)^(\s+)imgsz:(.*)$', "`${1}imgsz:`$2`n`${1}$line" }
+    else { Warn "detection_config.yaml already sets providers - not changed; check it uses only: $($passing -join ', ')" }
+    [IO.File]::WriteAllText($detCfg, $cfgText, (New-Object Text.UTF8Encoding($false)))
+} elseif ($parityExit -eq 0) {
+    Ok "All engines match the reference model (report: $parityJson)"
+    if ($cfgText -match $managed) {   # an earlier install restricted engines; all pass now
+        $cfgText = $cfgText -replace $managed, "`${1}providers: [auto]"
+        [IO.File]::WriteAllText($detCfg, $cfgText, (New-Object Text.UTF8Encoding($false)))
+    }
+} else {
+    Warn "Accuracy check could not run (see output above); run 'sentinel parity' later"
+}
+
 # ------------------------------------------------------------------ services (WinSW)
 Say "Installing Windows services"
 $svcDir = Join-Path $InstallDir 'service'
@@ -200,6 +230,15 @@ if (-not $health -or -not $health.detector_loaded) {
 }
 Ok "Engine status: $($health.status) - inference: $($health.inference.device)"
 Start-Service SentinelWatchdog
+
+# ------------------------------------------------------------------ command-line tools
+# 'sentinel gpu|parity|benchmark|health' from any new PowerShell window, with the right data folder
+[Environment]::SetEnvironmentVariable('SENTINEL_HOME', $DataDir, 'Machine')
+[Environment]::SetEnvironmentVariable('SENTINEL_PORT', "$Port", 'Machine')
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+if (($machinePath -split ';') -notcontains $InstallDir) {
+    [Environment]::SetEnvironmentVariable('Path', ($machinePath.TrimEnd(';') + ';' + $InstallDir), 'Machine')
+}
 
 # ------------------------------------------------------------------ firewall (only for LAN access)
 if ($ListenLan) {
@@ -237,5 +276,6 @@ Write-Host "  Access key:   $token   (also in $tokenFile)"
 Write-Host "  Services:     Get-Service SentinelEngine, SentinelWatchdog"
 Write-Host "  Logs:         $DataDir\logs"
 Write-Host "  Alerts setup: edit $notif, put secrets in $envFile, then Restart-Service SentinelEngine, SentinelWatchdog"
+Write-Host "  Tools:        open a NEW PowerShell window: sentinel gpu | sentinel parity | sentinel benchmark | sentinel health"
 Write-Host "  Uninstall:    powershell -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`""
 Write-Host "Before relying on it: run a 2-4 week site trial and record a verdict for every alert (Analytics > Site trial)."

@@ -10,6 +10,10 @@ on:
       - 'scripts/build_windows_bundle.py'
       - 'scripts/gpu_check.py'
       - 'scripts/watchdog.py'
+      - 'scripts/parity_check.py'
+      - 'scripts/_tooling.py'
+      - 'scripts/benchmark.py'
+      - 'tests/parity/**'
       - 'requirements-windows.txt'
       - 'rabahdev_best.onnx'
       - 'src/**'
@@ -99,6 +103,34 @@ jobs:
           "after crash: $($health.status)"
           if (-not $health.detector_loaded) { throw 'Engine did not recover after crash' }
 
+      - name: Live preview stream and command-line tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $token = (Get-Content "$env:ProgramData\Sentinel\api_token" -Raw).Trim()
+          # MJPEG live view (what the dashboard shows): expect >= 10 frames in 3 s
+          curl.exe -s --max-time 3 -o mjpeg.bin "http://127.0.0.1:8765/api/cameras/ci_fire/stream.mjpg?token=$token&fps=12&w=640"
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path mjpeg.bin))
+          $frames = ([regex]::Matches([Text.Encoding]::ASCII.GetString($bytes), '--frame')).Count
+          "live preview: $frames frames in 3 s"
+          if ($frames -lt 10) { throw "live preview too slow: $frames frames in 3 s" }
+          # tools via the installed 'sentinel' command (bundled Python, data dir found automatically)
+          $s = "$env:ProgramFiles\Sentinel\sentinel.cmd"
+          if ([Environment]::GetEnvironmentVariable('SENTINEL_HOME', 'Machine') -ne "$env:ProgramData\Sentinel") { throw 'SENTINEL_HOME not set' }
+          & $s gpu;       if ($LASTEXITCODE -ne 0) { throw 'sentinel gpu failed' }
+          & $s parity;    if ($LASTEXITCODE -ne 0) { throw 'sentinel parity failed' }
+          & $s benchmark --cameras 1 2 --seconds 2; if ($LASTEXITCODE -ne 0) { throw 'sentinel benchmark failed' }
+          & $s health;    if ($LASTEXITCODE -ne 0) { throw 'sentinel health failed' }
+          & $s watchdog;  if ($LASTEXITCODE -ne 0) { throw 'sentinel watchdog failed' }
+          # the same tools straight from the unpacked bundle (before/without installing)
+          & build\Sentinel-Windows-x64\sentinel.cmd gpu; if ($LASTEXITCODE -ne 0) { throw 'bundle sentinel gpu failed' }
+          Get-ChildItem "$env:ProgramData\Sentinel\logs\parity-*.json" | Select-Object -First 1 | ForEach-Object {
+            $p = Get-Content $_.FullName -Raw | ConvertFrom-Json
+            "install-time accuracy check: $($p.result) - " + (($p.engines | ForEach-Object { "$($_.provider)=$($_.status)" }) -join ', ')
+            if ($p.result -ne 'PASS') { throw 'install-time accuracy check failed' }
+          }
+          exit 0
+
       - name: Upgrade in place keeps key and cameras
         shell: powershell
         run: |
@@ -127,6 +159,9 @@ jobs:
           powershell -ExecutionPolicy Bypass -File "$env:ProgramFiles\Sentinel\uninstall.ps1" -RemoveData
           Start-Sleep 5
           if (Get-Service SentinelEngine -ErrorAction SilentlyContinue) { throw 'service still present' }
+          $mp = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          if (($mp -split ';') -contains "$env:ProgramFiles\Sentinel") { throw 'install folder still on PATH' }
+          if ([Environment]::GetEnvironmentVariable('SENTINEL_HOME', 'Machine')) { throw 'SENTINEL_HOME still set' }
           'uninstall OK'
 
       - uses: actions/upload-artifact@v4

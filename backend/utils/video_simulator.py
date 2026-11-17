@@ -153,7 +153,7 @@ class NetworkCamera:
         return round(self._cam.status.actual_fps, 1)
 
     def start(self):
-        self._cam.start()  # returns after ~2 s; reconnects in background if it failed
+        self._cam.start()  # returns at once; connects and reconnects in the background
 
     def stop(self):
         self._cam.stop()
@@ -216,10 +216,17 @@ class MultiCameraSimulator:
 class StreamProcessor:
     """Feeds NEW frames from every camera to the detection callback, rate-limited per camera."""
 
-    def __init__(self, detection_callback: Optional[Callable] = None, process_fps: float = 2.0):
+    def __init__(self, detection_callback: Optional[Callable] = None, process_fps: float = 2.0,
+                 burst_fps: Optional[float] = None, burst_hold: float = 10.0):
         self.simulator = MultiCameraSimulator()
         self.detection_callback = detection_callback
         self.process_interval = 1.0 / max(0.1, float(process_fps))
+        # Adaptive sampling: the callback returns the camera ids showing a candidate; those are
+        # analysed at burst_fps for burst_hold seconds (faster, more consistent confirmation).
+        self.burst_interval = 1.0 / max(float(burst_fps), 0.1) if burst_fps else self.process_interval
+        self.burst_interval = min(self.burst_interval, self.process_interval)
+        self.burst_hold = float(burst_hold)
+        self._burst_until: Dict[str, float] = {}
         self.is_processing = False
         self.process_thread = None
         self._last_seen: Dict[str, int] = {}
@@ -252,7 +259,8 @@ class StreamProcessor:
             cid = cam.camera_id
             if cam.frame_count == self._last_seen.get(cid):
                 continue  # no new frame since last detection
-            if now - self._last_processed.get(cid, 0) < self.process_interval:
+            interval = self.burst_interval if now < self._burst_until.get(cid, 0) else self.process_interval
+            if now - self._last_processed.get(cid, 0) < interval:
                 continue
             frame = cam.get_frame()
             if frame is None:
@@ -268,8 +276,12 @@ class StreamProcessor:
             if self.detection_callback and frames:
                 try:
                     t0 = time.time()
-                    self.detection_callback(frames)
+                    candidates = self.detection_callback(frames)
                     dt = time.time() - t0
+                    if candidates:
+                        until = time.time() + self.burst_hold
+                        for cid in candidates:
+                            self._burst_until[cid] = until
                     self._cycles = getattr(self, '_cycles', 0) + 1
                     if self._cycles > 3:  # ignore model warm-up cycles
                         self.cycle_seconds = dt if not self.cycle_seconds else 0.8 * self.cycle_seconds + 0.2 * dt
@@ -278,7 +290,7 @@ class StreamProcessor:
                 except Exception as e:
                     self.logger.error(f"Detection callback error: {e}")
             self.last_loop_time = time.time()
-            time.sleep(0.05)
+            time.sleep(0.02)
 
     def get_camera_status(self) -> dict:
         status = {}

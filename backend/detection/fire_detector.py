@@ -42,6 +42,9 @@ DEFAULT_CONFIG = {
             'path': 'rabahdev_best.pt',          # relative to SENTINEL_HOME
             'classes': ['fire', 'smoke', 'flame'],  # case-insensitive model class names
             'imgsz': 640,
+            'iou': 0.7,      # NMS overlap. Always passed explicitly: library defaults change between
+                             # versions (Ultralytics 8.4 moved its default 0.7 -> 0.5), which would make
+                             # the .pt and .onnx paths - and two installs - behave differently.
             # .onnx models: ONNX Runtime execution providers in priority order, or [auto]
             # (auto = CUDA -> DirectML -> CPU, whichever is installed and works)
             'providers': ['auto'],
@@ -97,8 +100,9 @@ class DetectionResult:
 class FireDetector:
     """Main fire detection engine"""
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, model_path: Optional[str] = None):
         self.config_path = paths.resolve(config_path) if config_path else paths.DETECTION_CONFIG
+        self._model_override = str(model_path) if model_path else None  # tools: benchmark/parity
         self._config_mtime = 0.0
         self.config = self._load_config()
         self._infer_lock = threading.Lock()
@@ -121,6 +125,8 @@ class FireDetector:
             logger.warning(f"Config file not found: {self.config_path}, using defaults")
             raw = {}
         config = _deep_merge(DEFAULT_CONFIG, raw)
+        if getattr(self, '_model_override', None):
+            config['detection']['model']['path'] = self._model_override
         validate_thresholds(config['detection']['thresholds'])
         return config
 
@@ -235,7 +241,8 @@ class FireDetector:
         min_conf = float(self.thresholds['log_only'])
         with self._infer_lock:  # Ultralytics models are not thread-safe
             results = self.model(list(frames), verbose=False, conf=min_conf,
-                                 imgsz=int(self.config['detection']['model'].get('imgsz', 640)))
+                                 imgsz=int(self.config['detection']['model'].get('imgsz', 640)),
+                                 iou=float(self.config['detection']['model'].get('iou', 0.7)))
         latency_ms = (time.time() - start) * 1000
         if latency_ms > self.config['system']['detection_latency_target'] * 1000:
             logger.warning(f"Detection latency {latency_ms:.0f} ms for {len(frames)} frame(s) exceeds target")

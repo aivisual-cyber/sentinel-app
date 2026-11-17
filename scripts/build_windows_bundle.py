@@ -131,8 +131,14 @@ def main(argv=None):
     app = out / 'app'
     shutil.copytree(ROOT / 'backend', app / 'backend', ignore=shutil.ignore_patterns('__pycache__', 'hardware'))
     (app / 'scripts').mkdir()
-    for s in ('watchdog.py', 'gpu_check.py', 'benchmark.py'):
+    for s in ('watchdog.py', 'gpu_check.py', 'benchmark.py', 'parity_check.py', '_tooling.py'):
         shutil.copy(ROOT / 'scripts' / s, app / 'scripts' / s)
+    # benchmark images + the accuracy reference set (PyTorch answers on lossless images) for parity_check
+    shutil.copytree(ROOT / 'tests' / 'fixtures', app / 'tests' / 'fixtures')
+    shutil.copytree(ROOT / 'tests' / 'parity', app / 'tests' / 'parity')
+    golden = json.loads((ROOT / 'tests' / 'parity' / 'golden.json').read_text())
+    if golden['onnx_sha256'] != hashlib.sha256(model.read_bytes()).hexdigest():
+        sys.exit("tests/parity/golden.json was made for a different ONNX model - run scripts/make_golden.py")
     (app / 'config').mkdir()
     for t in ('detection_config.yaml.template', 'notifications.yaml.template', 'cameras.yaml.template'):
         shutil.copy(ROOT / 'config' / t, app / 'config' / t)
@@ -151,8 +157,11 @@ def main(argv=None):
     win = ROOT / 'deploy' / 'windows'
     for f in win.glob('*.xml.template'):
         shutil.copy(f, out / 'service' / f.name)
-    for f in ('install.ps1', 'uninstall.ps1', 'README-WINDOWS.md'):
+    for f in ('install.ps1', 'uninstall.ps1', 'README-WINDOWS.md', 'sentinel.cmd'):
         shutil.copy(win / f, out / f)
+    # cmd.exe needs CRLF line endings
+    cmd = out / 'sentinel.cmd'
+    cmd.write_bytes(cmd.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
     # PowerShell 5.1 reads BOM-less scripts as ANSI: add a UTF-8 BOM so any non-ASCII text survives
     for f in ('install.ps1', 'uninstall.ps1'):
         p = out / f

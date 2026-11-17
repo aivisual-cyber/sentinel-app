@@ -1,5 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useTauriCommand } from './useTauriApi';
+import { useTauriCommand, useTauriApi } from './useTauriApi';
+
+const PREVIEW_FPS = 12;          // live view; detection runs separately at its own rate (2 FPS)
+const POLL_MIN_MS = 1000 / PREVIEW_FPS;
+const STATUS_REFRESH_MS = 3000;  // while any camera is still connecting
+const IDLE_REFRESH_MS = 10000;
 
 export const useCameraManager = () => {
   const [cameras, setCameras] = useState([]);
@@ -7,6 +12,8 @@ export const useCameraManager = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const frameUpdateRef = useRef(null);
+  const { api } = useTauriApi();
+  const streamUrlFor = api && api.cameraStreamUrl;  // browser mode: MJPEG stream, no polling
   
   // Tauri commands
   const { execute: getCameraFeeds } = useTauriCommand('get_camera_feeds');
@@ -17,9 +24,9 @@ export const useCameraManager = () => {
   const { execute: removeCamera } = useTauriCommand('remove_camera');
 
   // Fetch camera list and status
-  const refreshCameras = useCallback(async () => {
+  const refreshCameras = useCallback(async ({ silent = false } = {}) => {
     try {
-      setIsLoading(true);
+      if (!silent) setIsLoading(true);
       setError(null);
       const data = await getCameraFeeds();
       
@@ -71,26 +78,48 @@ export const useCameraManager = () => {
     }
   }, [getCameraFrame]);
 
-  // Start frame updates for all online cameras
+  // Live preview for all online cameras.
+  // Browser mode: one MJPEG stream per camera (smooth ~12 FPS, no JSON/base64 polling).
+  // Tauri shell: sequential polling as fast as frames arrive (never overlapping requests).
   const startFrameUpdates = useCallback(() => {
     if (frameUpdateRef.current) {
-      clearInterval(frameUpdateRef.current);
+      frameUpdateRef.current.stop();
       frameUpdateRef.current = null;
     }
-
-    frameUpdateRef.current = setInterval(async () => {
-      const onlineCameras = cameras.filter(camera => camera.status === 'online');
-      
-      for (const camera of onlineCameras) {
-        await getCameraCurrentFrame(camera.id);
+    const onlineCameras = cameras.filter(camera => camera.status === 'online');
+    if (streamUrlFor) {
+      setFrames(current => {
+        const next = {};
+        for (const camera of onlineCameras) {
+          next[camera.id] = current[camera.id]?.stream
+            ? current[camera.id]
+            : { url: streamUrlFor(camera.id, { fps: PREVIEW_FPS }), stream: true, cameraId: camera.id };
+        }
+        return next;
+      });
+      frameUpdateRef.current = { stop: () => {} };
+      return;
+    }
+    let active = true;
+    const loop = async () => {
+      while (active) {
+        const started = Date.now();
+        for (const camera of onlineCameras) {
+          if (!active) return;
+          await getCameraCurrentFrame(camera.id);
+        }
+        const wait = Math.max(10, POLL_MIN_MS - (Date.now() - started));
+        await new Promise(resolve => setTimeout(resolve, wait));
       }
-    }, 2000); // Update every 2 seconds
-  }, [cameras, getCameraCurrentFrame]);
+    };
+    if (onlineCameras.length) loop();
+    frameUpdateRef.current = { stop: () => { active = false; } };
+  }, [cameras, getCameraCurrentFrame, streamUrlFor]);
 
   // Stop frame updates
   const stopFrameUpdates = useCallback(() => {
     if (frameUpdateRef.current) {
-      clearInterval(frameUpdateRef.current);
+      frameUpdateRef.current.stop();
       frameUpdateRef.current = null;
     }
   }, []);
@@ -191,10 +220,17 @@ export const useCameraManager = () => {
     }
   }, [removeCamera, refreshCameras]);
 
-  // Initialize cameras on mount
+  // Initialize cameras on mount, then keep status fresh: quickly while a camera is still
+  // connecting (so its live view appears as soon as the stream is up), slowly otherwise.
   useEffect(() => {
     refreshCameras();
   }, [refreshCameras]);
+
+  const anyConnecting = cameras.some(c => c.status !== 'online');
+  useEffect(() => {
+    const id = setInterval(() => refreshCameras({ silent: true }), anyConnecting ? STATUS_REFRESH_MS : IDLE_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [refreshCameras, anyConnecting]);
 
   // Start frame updates when cameras are available
   useEffect(() => {

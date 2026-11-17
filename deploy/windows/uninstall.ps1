@@ -43,12 +43,22 @@ foreach ($lnk in @("$env:PUBLIC\Desktop\Sentinel Fire Monitor.lnk",
     if (Test-Path $lnk) { Remove-Item $lnk -Force }
 }
 
+# Command-line tools: PATH entry and machine variables set by install.ps1
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$kept = @($machinePath -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $InstallDir })
+[Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'Machine')
+$homeVar = [Environment]::GetEnvironmentVariable('SENTINEL_HOME', 'Machine')
+if ($homeVar -and $homeVar.TrimEnd('\') -eq $DataDir) {
+    [Environment]::SetEnvironmentVariable('SENTINEL_HOME', $null, 'Machine')
+    [Environment]::SetEnvironmentVariable('SENTINEL_PORT', $null, 'Machine')
+}
+
 # Program files: only what install.ps1 put there. The folder itself goes only if it is then empty.
 # Runs after this script exits because uninstall.ps1 itself lives in InstallDir.
 if ((Test-Path $marker) -or (Test-Path (Join-Path $InstallDir 'app\run_sentinel.py'))) {
     $cmds = @('timeout /t 2 >nul')
     foreach ($d in @('python', 'app', 'ui', 'tools', 'service')) { $cmds += "rmdir /s /q `"$InstallDir\$d`"" }
-    foreach ($f in @('uninstall.ps1', 'README-WINDOWS.md', 'sentinel-install.json')) { $cmds += "del /q `"$InstallDir\$f`"" }
+    foreach ($f in @('uninstall.ps1', 'README-WINDOWS.md', 'sentinel-install.json', 'sentinel.cmd')) { $cmds += "del /q `"$InstallDir\$f`"" }
     $cmds += "rmdir `"$InstallDir`""
     Start-Process -FilePath cmd.exe -ArgumentList ('/c ' + ($cmds -join ' & ')) -WindowStyle Hidden
     Write-Host "Removed program files from $InstallDir"

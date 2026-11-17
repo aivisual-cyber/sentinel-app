@@ -95,15 +95,24 @@ No camera at hand? Add a **video file** as a camera: copy the test video to
   alert in *Incident Management* with the **EVIDENCE** image.
 * Mark it **TEST** (drills) — real ones **REAL FIRE** / **FALSE ALARM**.
 
-### Step 10. Check speed and capacity on this machine
+### Step 10. Check accuracy, speed and capacity on this machine
 
-In the Administrator PowerShell:
+Open a **new** PowerShell window (so it picks up the `sentinel` command the installer added) and run:
 ```powershell
-& "C:\Program Files\Sentinel\python\python.exe" "C:\Program Files\Sentinel\app\scripts\gpu_check.py"
-$env:SENTINEL_HOME="C:\ProgramData\Sentinel"
-& "C:\Program Files\Sentinel\python\python.exe" "C:\Program Files\Sentinel\app\scripts\benchmark.py"
+sentinel parity
+sentinel gpu
+sentinel benchmark
 ```
-`benchmark.py` prints how many cameras this machine handles at 2 analysed frames/second.
+* `sentinel parity` – **accuracy check**: runs the shipped model on 34 reference images with every engine on this PC
+  (DirectML GPU, CPU, CUDA if present) and compares with the answers of the original PyTorch model. Each engine must
+  show `PASS` (same alert decision on every image, confidence within 0.02, same boxes). The installer already ran it
+  and uses only engines that pass; the report is in `<data folder>\logs\parity-*.json`.
+* `sentinel gpu` – which engine detection uses and its speed (ms per frame).
+* `sentinel benchmark` – how many cameras this PC handles at 2 analysed frames/second.
+  Your own images or a video: `sentinel benchmark --images D:\clips\fire.mp4`.
+
+These use Sentinel's own Python (with ONNX Runtime and DirectML). Do **not** run the `.py` files with another Python
+or a venv – it lacks those packages. `sentinel health` shows the engine status; `sentinel` alone lists the commands.
 
 ### Step 11. (Optional) Email / webhook / SMS alerts
 
@@ -123,11 +132,12 @@ Leave it running ≥ 14 days, give a verdict for **every** alert, and review *An
 | Task | Command |
 |---|---|
 | Status | `Get-Service SentinelEngine, SentinelWatchdog` |
-| Health | `Invoke-RestMethod http://127.0.0.1:8765/api/health` |
+| Health | `sentinel health` |
+| Accuracy check | `sentinel parity` (after a driver update too) |
 | Restart | `Restart-Service SentinelEngine` |
 | Logs | `C:\ProgramData\Sentinel\logs\` (`sentinel.log`, `SentinelEngine.err.log`) |
 | Access key | `Get-Content C:\ProgramData\Sentinel\api_token` |
-| Upgrade | unpack a newer bundle, run its `install.ps1` (keeps cameras, alerts, key) |
+| Upgrade | unpack a newer bundle **to a new folder**, run its `install.ps1` with the same `-InstallDir`/`-DataDir` (keeps cameras, alerts, key, settings) |
 | Uninstall | `powershell -ExecutionPolicy Bypass -File "C:\Program Files\Sentinel\uninstall.ps1"` (`-RemoveData` deletes data) |
 
 ## If something goes wrong
@@ -135,6 +145,8 @@ Leave it running ≥ 14 days, give a verdict for **every** alert, and review *An
 | Problem | What to do |
 |---|---|
 | "running scripts is disabled" | use the exact command in step 6 (`-ExecutionPolicy Bypass`) |
+| Installer refuses the folders | use separate folders, not the unpacked bundle, not a drive root: `-InstallDir E:\Sentinel -DataDir E:\SentinelData` (NTFS drive) |
+| `ModuleNotFoundError: onnxruntime` / config not found when running a script | use `sentinel gpu` / `sentinel parity` / `sentinel benchmark` instead of `python ...py` |
 | Installer says *Bundle is incomplete* | the zip was not fully extracted — extract again (step 5) |
 | Inference shows **CPU** on a GPU machine | install/update the GPU driver (step 4), run `gpu_check.py`; datacenter cards in TCC mode need WDDM mode |
 | Console shows **DETECTION OFFLINE** | `Get-Service SentinelEngine`; read `C:\ProgramData\Sentinel\logs\SentinelEngine.err.log` |

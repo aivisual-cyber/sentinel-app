@@ -35,17 +35,24 @@ class TemporalConfirmer:
     them at a cost of (min_hits / process_fps) seconds of latency.
     """
 
+    # Hits older than this never combine (e.g. one before a camera froze or reconnected and two
+    # after it): confirmation must come from frames close together in time.
+    MAX_AGE_SECONDS = 6.0
+
     def __init__(self, window: int = 5, min_hits: int = 3):
         self.window, self.min_hits = max(1, window), max(1, min(min_hits, window))
         self._hist: Dict[str, deque] = {}
 
-    def update(self, camera_id: str, level: str) -> str:
+    def update(self, camera_id: str, level: str, now: float = None) -> str:
+        now = time.time() if now is None else now
         h = self._hist.setdefault(camera_id, deque(maxlen=self.window))
         if h.maxlen != self.window:
             h = self._hist[camera_id] = deque(h, maxlen=self.window)
-        h.append(LEVEL_RANK.get(level, 0))
+        while h and now - h[0][0] > self.MAX_AGE_SECONDS:
+            h.popleft()
+        h.append((now, LEVEL_RANK.get(level, 0)))
         for rank in (3, 2, 1):
-            if sum(r >= rank for r in h) >= self.min_hits:
+            if sum(r >= rank for _, r in h) >= self.min_hits:
                 return RANK_LEVEL[rank]
         return 'None'
 
@@ -115,26 +122,35 @@ class SentinelSystem:
 
         self.fire_detector = FireDetector(str(self.config_manager.config_path))
         self.confirmer = TemporalConfirmer(det.temporal_window, det.temporal_min_hits)
-        self.stream_processor = StreamProcessor(self._detection_callback, process_fps=system.frame_rate)
+        self.stream_processor = StreamProcessor(self._detection_callback, process_fps=system.frame_rate,
+                                                burst_fps=system.burst_frame_rate,
+                                                burst_hold=system.burst_hold_seconds)
         self.stream_processor.start_processing()
-        self.logger.info(f"Camera stream processing started at {system.frame_rate} FPS per camera")
+        self.logger.info(f"Camera stream processing started at {system.frame_rate} FPS per camera "
+                         f"({system.burst_frame_rate} FPS for {system.burst_hold_seconds:.0f} s after a candidate)")
 
-    def _detection_callback(self, frames: Dict[str, Any]):
+    def _detection_callback(self, frames: Dict[str, Any]) -> set:
+        """Analyse one batch; returns the camera ids with a fire/smoke candidate (any level), which
+        the stream processor then samples faster."""
         ids = list(frames)
+        candidates = set()
         try:
             # One batched inference for all cameras with a new frame this cycle
             results = self.fire_detector.detect_batch([frames[c] for c in ids])
         except Exception as e:
             self.last_detection_error = str(e)
             self.logger.error(f"Batch detection failed: {e}")
-            return
+            return candidates
+        det = self.config_manager.get_detection_config()  # once per batch, not per camera
+        self.confirmer.window, self.confirmer.min_hits = det.temporal_window, det.temporal_min_hits
+        now = time.time()
         for camera_id, result in zip(ids, results):
             frame = frames[camera_id]
             try:
                 self.frames_processed += 1
-                det = self.config_manager.get_detection_config()
-                self.confirmer.window, self.confirmer.min_hits = det.temporal_window, det.temporal_min_hits
-                confirmed = self.confirmer.update(camera_id, result.alert_level)
+                if result.alert_level != 'None':
+                    candidates.add(camera_id)
+                confirmed = self.confirmer.update(camera_id, result.alert_level, now)
                 if confirmed == 'None':
                     continue
                 self.detections_made += 1
@@ -150,6 +166,7 @@ class SentinelSystem:
             except Exception as e:
                 self.last_detection_error = str(e)
                 self.logger.error(f"Detection error for camera {camera_id}: {e}")
+        return candidates
 
     async def _main_loop(self):
         self.logger.info("Sentinel system running - monitoring cameras for fire detection")

@@ -17,44 +17,26 @@ import sys
 import time
 from pathlib import Path
 
-# Windows services / redirected output use a legacy code page: never crash on a non-ASCII character
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding='utf-8', errors='replace')
-    except Exception:
-        pass
-
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / 'backend'))
-import paths  # noqa: E402
-
-
-def model_path() -> Path:
-    import yaml
-    try:
-        cfg = yaml.safe_load(paths.DETECTION_CONFIG.read_text()) or {}
-        p = paths.resolve(cfg['detection']['model']['path'])
-        if p.suffix == '.onnx' and p.exists():
-            return p
-    except Exception:
-        pass
-    for c in (paths.MODELS_DIR / 'fire_smoke.onnx', ROOT / 'rabahdev_best.onnx'):
-        if c.exists():
-            return c
-    raise SystemExit("No .onnx model found")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tooling import find_model, where  # noqa: E402  (sets up paths, UTF-8 output)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--json', action='store_true')
     ap.add_argument('--runs', type=int, default=10)
+    ap.add_argument('--model', default=None, help='.onnx model (default: the one the service uses)')
     args = ap.parse_args(argv)
 
-    import onnxruntime as ort
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        sys.exit("onnxruntime is not installed in this Python. Use Sentinel's own Python: run "
+                 "'sentinel gpu' (or <InstallDir>\\python\\python.exe app\\scripts\\gpu_check.py).")
     from detection.onnx_backend import OnnxYolo, gpu_names
-    mp = model_path()
+    mp = find_model(args.model, onnx_only=True)
     frame = (np.random.default_rng(0).random((720, 1280, 3)) * 255).astype(np.uint8)
     report = {'platform': platform.platform(), 'python': platform.python_version(),
               'onnxruntime': ort.__version__, 'available_providers': ort.get_available_providers(),
@@ -85,6 +67,8 @@ def main(argv=None):
     if args.json:
         print(json.dumps(report, indent=1))
     else:
+        print(where())
+        print(f"Model        {mp}")
         print(f"Platform     {report['platform']}  (Python {report['python']}, onnxruntime {report['onnxruntime']})")
         print(f"GPUs         {', '.join(report['gpus']) or 'none detected'}")
         print(f"Providers    {', '.join(report['available_providers'])}")

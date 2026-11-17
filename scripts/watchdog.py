@@ -102,12 +102,21 @@ def main(argv=None):
         print("[watchdog] WARNING: no notification channels enabled in config/notifications.yaml - "
               "status changes will only be printed", flush=True)
     st = load_state()
-    while True:
-        st = check(args, notifier, st)
-        save_state(st)
-        if args.once:
-            return 0
-        time.sleep(args.interval)
+    if not args.once:
+        print(f"[watchdog] checking {args.url} every {args.interval:.0f} s - Ctrl+C to stop "
+              "(on Windows the SentinelWatchdog service already does this; use --once for a single check)",
+              flush=True)
+    try:
+        while True:
+            st = check(args, notifier, st)
+            save_state(st)
+            if args.once:
+                print(f"[watchdog] engine status now: {probe(args.url)['state']} (last notified: {st['reported']})", flush=True)
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("[watchdog] stopped", flush=True)
+        return 0
 
 
 if __name__ == '__main__':

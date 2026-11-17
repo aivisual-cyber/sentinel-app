@@ -3,6 +3,14 @@ RTSP Camera Manager
 Handles real RTSP camera connections, ONVIF discovery, and stream management
 """
 
+import os
+
+# Low-latency FFmpeg capture (read by OpenCV at every open): TCP transport (no UDP packet loss /
+# smeared frames), no input buffering, and a shorter stream probe so a camera opens in ~1 s
+# instead of ~5 s. Override with the same variable in the service environment if a camera needs it.
+os.environ.setdefault('OPENCV_FFMPEG_CAPTURE_OPTIONS',
+                      'rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|probesize;1000000|analyzeduration;1000000')
+
 import cv2
 import numpy as np
 import threading
@@ -63,8 +71,9 @@ class RTSPCamera:
         self.last_fps_check = time.time()
         self.fps_frame_count = 0
         
-    def start(self) -> bool:
-        """Start the RTSP camera stream"""
+    def start(self, wait: float = 0.0) -> bool:
+        """Start the capture thread. Returns at once (wait=0) so adding cameras or starting the
+        service never blocks; the stream connects - and reconnects - in the background."""
         if self.is_running:
             return True
             
@@ -76,8 +85,9 @@ class RTSPCamera:
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
         
-        # Wait a moment to check if connection succeeds
-        time.sleep(2)
+        deadline = time.time() + wait
+        while wait and time.time() < deadline and not self.status.connected:
+            time.sleep(0.1)
         return self.status.connected
     
     def stop(self):
@@ -96,12 +106,15 @@ class RTSPCamera:
     
     def _capture_loop(self):
         """Main capture loop for RTSP stream"""
+        backoff = 1.0
         while self.is_running:
             try:
                 if not self._connect():
-                    time.sleep(self.config.retry_interval)
+                    # quick first retries (camera or publisher still starting), then retry_interval
+                    self._sleep_while_running(backoff)
+                    backoff = min(backoff * 2, float(self.config.retry_interval))
                     continue
-                
+                backoff = 1.0
                 self._read_frames()
                 
             except Exception as e:
@@ -114,7 +127,13 @@ class RTSPCamera:
                     self.cap.release()
                     self.cap = None
                 
-                time.sleep(self.config.retry_interval)
+                self._sleep_while_running(backoff)
+                backoff = min(backoff * 2, float(self.config.retry_interval))
+
+    def _sleep_while_running(self, seconds: float):
+        end = time.time() + seconds
+        while self.is_running and time.time() < end:
+            time.sleep(0.2)
     
     def _connect(self) -> bool:
         """Connect to RTSP stream"""
@@ -338,7 +357,7 @@ class RTSPManager:
     def start_camera(self, camera_id: str) -> bool:
         """Start a specific camera"""
         if camera_id in self.cameras:
-            return self.cameras[camera_id].start()
+            return self.cameras[camera_id].start(wait=2)
         return False
     
     def stop_camera(self, camera_id: str):
@@ -350,7 +369,7 @@ class RTSPManager:
         """Start all cameras"""
         started = 0
         for camera in self.cameras.values():
-            if camera.start():
+            if camera.start(wait=2):
                 started += 1
         self.logger.info(f"Started {started}/{len(self.cameras)} cameras")
         return started

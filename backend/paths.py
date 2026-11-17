@@ -11,7 +11,32 @@ wrote a different database and lost cameras. All paths now resolve from
 import os
 from pathlib import Path
 
-SENTINEL_HOME = Path(os.environ.get("SENTINEL_HOME", Path(__file__).resolve().parent.parent)).resolve()
+APP_ROOT = Path(__file__).resolve().parent.parent   # repo root, or <InstallDir>\app on Windows
+
+
+def _find_home() -> Path:
+    r"""Where config/data/logs live. Order: SENTINEL_HOME env var (services; set machine-wide by the
+    Windows installer) -> the install marker next to app\ (scripts run from <InstallDir>\app) ->
+    %ProgramData%\Sentinel if it holds a config -> the repository root (development)."""
+    env = os.environ.get("SENTINEL_HOME")
+    if env:
+        return Path(env)
+    marker = APP_ROOT.parent / "sentinel-install.json"
+    if marker.is_file():
+        try:
+            import json
+            data_dir = json.loads(marker.read_text(encoding="utf-8-sig")).get("DataDir")
+            if data_dir and Path(data_dir).is_dir():
+                return Path(data_dir)
+        except Exception:
+            pass
+    program_data = os.environ.get("ProgramData")
+    if program_data and (Path(program_data) / "Sentinel" / "config" / "detection_config.yaml").is_file():
+        return Path(program_data) / "Sentinel"
+    return APP_ROOT
+
+
+SENTINEL_HOME = _find_home().resolve()
 
 CONFIG_DIR = SENTINEL_HOME / "config"
 DATA_DIR = SENTINEL_HOME / "data"

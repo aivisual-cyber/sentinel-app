@@ -17,10 +17,11 @@ const isValidFrameUrl = (url) => {
     return /^data:image\/(jpeg|jpg|png|gif|webp);base64,[A-Za-z0-9+/]+=*$/.test(url);
   }
   
-  // Check for valid HTTP/HTTPS URLs (for RTSP streams converted to HTTP)
+  // Check for valid HTTP/HTTPS URLs (the backend's live MJPEG preview stream)
   if (url.startsWith('http://') || url.startsWith('https://')) {
     try {
       const urlObj = new URL(url);
+      if (urlObj.origin === window.location.origin && urlObj.pathname.startsWith('/api/cameras/')) return true;
       return ['localhost', '127.0.0.1'].includes(urlObj.hostname) || 
              urlObj.hostname.match(/^192\.168\.\d+\.\d+$/) ||
              urlObj.hostname.match(/^10\.\d+\.\d+\.\d+$/) ||
@@ -50,6 +51,12 @@ const CameraFeed = ({ camera, frame, onRefresh, onRemove, delay = 0 }) => {
   
   const statusConfig = getStatusConfig();
   const StatusIcon = statusConfig.icon;
+  // A live stream that drops (engine restart, network) reconnects by itself after 2 s
+  const [streamRetry, setStreamRetry] = useState(0);
+  const frameSrc = frame && frame.stream && streamRetry ? `${frame.url}&retry=${streamRetry}` : frame && frame.url;
+  const onFrameError = () => {
+    if (frame && frame.stream) setTimeout(() => setStreamRetry(r => r + 1), 2000);
+  };
   const hasValidFrame = frame && frame.url && isValidFrameUrl(frame.url);
   const hasInvalidFrame = frame && frame.url && !isValidFrameUrl(frame.url);
   
@@ -106,7 +113,8 @@ const CameraFeed = ({ camera, frame, onRefresh, onRemove, delay = 0 }) => {
         {hasValidFrame ? (
           <>
             <img 
-              src={frame.url} 
+              src={frameSrc}
+              onError={onFrameError} 
               alt={`Camera ${camera.id} feed`}
               className="w-full h-full object-cover"
             />
@@ -225,7 +233,8 @@ const CameraFeed = ({ camera, frame, onRefresh, onRemove, delay = 0 }) => {
             <div className="relative bg-black">
               {hasValidFrame ? (
                 <img 
-                  src={frame.url} 
+                  src={frameSrc}
+              onError={onFrameError} 
                   alt={`Camera ${camera.id} expanded view`}
                   className="w-full h-auto max-h-[70vh] object-contain"
                 />

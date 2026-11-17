@@ -19,6 +19,7 @@ from typing import Optional
 import aiohttp_cors
 import cv2
 from aiohttp import web
+from aiohttp.abc import AbstractAccessLogger
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -46,9 +47,25 @@ async def auth_middleware(request, handler):
             and request.path != '/api/health'):
         import hmac
         supplied = request.headers.get('Authorization', '')
+        # <img> tags cannot send headers: the live MJPEG preview may pass the key as ?token=
+        # (the access log below never records query strings)
+        if request.path.endswith('/stream.mjpg') and request.query.get('token'):
+            supplied = f"Bearer {request.query['token']}"
         if not hmac.compare_digest(supplied, f'Bearer {API_TOKEN}'):
             return web.json_response({'success': False, 'error': 'unauthorized'}, status=401)
     return await handler(request)
+
+
+class _AccessLogger(AbstractAccessLogger):
+    """Access log without query strings (the preview stream URL carries the access key)."""
+
+    def log(self, request, response, time):
+        self.logger.info('%s "%s %s" %s %.3fs', request.remote, request.method, request.path,
+                         response.status, time)
+
+
+PREVIEW_FPS = float(os.environ.get('SENTINEL_PREVIEW_FPS', 12))      # live view; detection stays at frame_rate
+PREVIEW_WIDTH = int(os.environ.get('SENTINEL_PREVIEW_WIDTH', 960))
 
 
 def _json_error(message: str, status: int) -> web.Response:
@@ -69,6 +86,7 @@ class SentinelAPIServer:
         self.camera_config = CameraConfigManager()
         self.logger = logging.getLogger(__name__)
         self.is_running = False
+        self._preview_cache = {}   # camera_id -> (frame_count, width, jpeg): one encode shared by all viewers
 
         self.cors = aiohttp_cors.setup(self.app, defaults={
             origin: aiohttp_cors.ResourceOptions(allow_credentials=False, expose_headers="*",
@@ -89,6 +107,7 @@ class SentinelAPIServer:
         r.add_get('/api/report', self.get_trial_report)
         r.add_get('/api/cameras', self.get_camera_feeds)
         r.add_get('/api/cameras/{camera_id}/frame', self.get_camera_frame)
+        r.add_get('/api/cameras/{camera_id}/stream.mjpg', self.stream_camera)
         r.add_post('/api/cameras/discover', self.discover_cameras)
         r.add_post('/api/cameras/add', self.add_camera)
         r.add_post('/api/cameras/{camera_id}/test', self.test_camera)
@@ -270,9 +289,65 @@ class SentinelAPIServer:
         frame = cam.get_frame()
         if frame is None:
             return _json_error('No frame received yet', 404)
-        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        return web.json_response({'camera_id': cam.camera_id, 'frame': base64.b64encode(buf).decode(),
+        try:
+            width = int(request.query.get('w', 0))
+        except ValueError:
+            width = 0
+        jpg = await asyncio.to_thread(self._preview_jpeg, cam, frame, width or None)
+        return web.json_response({'camera_id': cam.camera_id, 'frame': base64.b64encode(jpg).decode(),
                                   'timestamp': cam.last_frame_time, 'format': 'jpeg'})
+
+    def _preview_jpeg(self, cam, frame, width) -> bytes:
+        """JPEG of the camera's current frame, downscaled to `width`; cached per new frame."""
+        key = (cam.frame_count, width)
+        hit = self._preview_cache.get(cam.camera_id)
+        if hit and hit[0] == key:
+            return hit[1]
+        h, w = frame.shape[:2]
+        if width and w > width:
+            frame = cv2.resize(frame, (width, max(1, int(h * width / w))), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        jpg = buf.tobytes()
+        self._preview_cache[cam.camera_id] = (key, jpg)
+        return jpg
+
+    async def stream_camera(self, request) -> web.StreamResponse:
+        """Live preview as MJPEG (multipart/x-mixed-replace): smooth 10-15 FPS in any browser <img>,
+        independent of the detection rate. Only new frames are sent; encoding is shared per camera."""
+        if (err := self._require_backend()):
+            return err
+        cid = request.match_info['camera_id']
+        if self.processor.simulator.get(cid) is None:
+            return _json_error('Camera not found', 404)
+        try:
+            fps = min(max(float(request.query.get('fps', PREVIEW_FPS)), 1.0), 25.0)
+            width = min(max(int(request.query.get('w', PREVIEW_WIDTH)), 160), 3840)
+        except ValueError:
+            return _json_error('fps and w must be numbers', 400)
+        resp = web.StreamResponse(headers={
+            'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+            'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache',
+            'X-Accel-Buffering': 'no'})
+        await resp.prepare(request)
+        loop = asyncio.get_running_loop()
+        interval, last = 1.0 / fps, None
+        try:
+            while self.is_running and self.processor:
+                t0 = loop.time()
+                cam = self.processor.simulator.get(cid)
+                if cam is None:
+                    break  # camera removed
+                if cam.frame_count != last:
+                    frame = cam.get_frame()
+                    if frame is not None:
+                        jpg = await asyncio.to_thread(self._preview_jpeg, cam, frame, width)
+                        last = cam.frame_count
+                        await resp.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
+                                         + str(len(jpg)).encode() + b'\r\n\r\n' + jpg + b'\r\n')
+                await asyncio.sleep(max(0.005, interval - (loop.time() - t0)))
+        except (ConnectionResetError, ConnectionError, asyncio.CancelledError):
+            pass  # viewer closed the page
+        return resp
 
     async def discover_cameras(self, request) -> web.Response:
         from detection.rtsp_manager import ONVIFDiscovery
@@ -301,18 +376,33 @@ class SentinelAPIServer:
         if self.processor.simulator.get(camera_id) or camera_id in self.camera_config.cameras:
             return _json_error(f'Camera {camera_id} already exists', 400)
 
-        # Connection test runs in a worker thread: it can take up to the open timeout
-        ok, message = await asyncio.to_thread(self._test_source, url, data.get('username'), data.get('password'))
-        if not ok:
-            return _json_error(f'Camera test failed: {message}', 400)
-
         profile = CameraProfile(camera_id=camera_id, name=data.get('name') or f'Camera {camera_id}',
                                 rtsp_url=url, username=data.get('username') or None,
                                 password=data.get('password') or None, fps=int(data.get('fps', 15)),
                                 enabled=bool(data.get('enabled', True)), location=data.get('location', 'Unknown'))
-        if not self.camera_config.add_camera(profile):
-            return _json_error('Failed to save camera configuration', 500)
-        await asyncio.to_thread(self._start_camera, profile)
+        if url.lower().startswith(('rtsp://', 'rtsps://', 'http://', 'https://')):
+            # ONE connection: start the camera and wait for its first frame (it used to be opened for a
+            # test, closed, then opened again - doubling the time before the live view appeared).
+            await asyncio.to_thread(self._start_camera, profile)
+            cam = self.processor.simulator.get(camera_id)
+            deadline = time.time() + float(data.get('timeout', 15))
+            while time.time() < deadline and cam.frame_count == 0:
+                await asyncio.sleep(0.1)
+            if cam.frame_count == 0:
+                reason = cam.last_error or 'no video received'
+                await asyncio.to_thread(self.processor.simulator.remove_camera, camera_id)
+                return _json_error(f'Camera test failed: {reason}', 400)
+            message = f'connected, {cam.resolution}' if cam.resolution else 'connected'
+            if not self.camera_config.add_camera(profile):
+                await asyncio.to_thread(self.processor.simulator.remove_camera, camera_id)
+                return _json_error('Failed to save camera configuration', 500)
+        else:
+            ok, message = await asyncio.to_thread(self._test_source, url, data.get('username'), data.get('password'))
+            if not ok:
+                return _json_error(f'Camera test failed: {message}', 400)
+            if not self.camera_config.add_camera(profile):
+                return _json_error('Failed to save camera configuration', 500)
+            await asyncio.to_thread(self._start_camera, profile)
         return web.json_response({'success': True, 'camera_id': camera_id, 'message': f'Camera {camera_id} added ({message})'})
 
     def _start_camera(self, profile: CameraProfile):
@@ -395,7 +485,7 @@ class SentinelAPIServer:
 
     async def start_server(self):
         await self.start_backend_system()
-        runner = web.AppRunner(self.app)
+        runner = web.AppRunner(self.app, access_log_class=_AccessLogger)
         await runner.setup()
         await web.TCPSite(runner, self.host, self.port).start()
         self.is_running = True

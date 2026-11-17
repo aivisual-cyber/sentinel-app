@@ -92,6 +92,14 @@ const commands = {
   stop_python_backend: async () => false,
 };
 
+/** Live MJPEG preview URL for an <img> (the browser keeps one connection open per camera). */
+export const cameraStreamUrl = (cameraId, { fps = 12, width = 960 } = {}) => {
+  const base = apiBase() || window.location.origin;
+  const q = new URLSearchParams({ fps: String(fps), w: String(width) });
+  if (token) q.set('token', token);
+  return `${base}/api/cameras/${encodeURIComponent(cameraId)}/stream.mjpg?${q.toString()}`;
+};
+
 export const httpApi = {
   invoke: async (command, args) => {
     const fn = commands[command];
@@ -102,4 +110,5 @@ export const httpApi = {
   listen: async () => () => {},
   isAvailable: true,
   transport: 'http',
+  cameraStreamUrl,
 };
