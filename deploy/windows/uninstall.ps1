@@ -59,7 +59,7 @@ if ((Test-Path $marker) -or (Test-Path (Join-Path $InstallDir 'app\run_sentinel.
 if ($RemoveData) {
     $looksLikeData = (Test-Path (Join-Path $DataDir 'api_token')) -or (Test-Path (Join-Path $DataDir 'config\detection_config.yaml'))
     if ($DataDir -match '^[A-Za-z]:$' -or -not $looksLikeData) {
-        Write-Host "Not deleting $DataDir: it does not look like a Sentinel data folder." -ForegroundColor Yellow
+        Write-Host "Not deleting ${DataDir}: it does not look like a Sentinel data folder." -ForegroundColor Yellow
     } else {
         Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
         Write-Host "Removed data directory $DataDir"
