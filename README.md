@@ -37,14 +37,18 @@ An independent end-to-end review found that earlier builds **could not raise a c
 | Alerting | ✅ In-app P1 siren + banner + desktop notification; email / webhook / Twilio SMS with offline outbox |
 | UI | ✅ Live grid, incident evidence frames, acknowledge, honest health (shows **DETECTION OFFLINE** when not monitoring) |
 | Security | ✅ Localhost-only API, per-launch token, restricted CORS, camera config `0600` |
-| Not yet | ⚠️ Accuracy on *your* scenes is unmeasured — run a site trial; small flames are often missed; no bundled Python sidecar for installers; sunset/fog compensation not implemented; not certified for life safety |
+| Operations | ✅ Always-on systemd service + desktop client, one-command installer, watchdog, heartbeat, health self-assessment — see **[docs/OPERATIONS.md](docs/OPERATIONS.md)** |
+| Site trial | ✅ Operator verdicts per alert → precision & false alarms/day per camera, CSV export; verdicts feed retraining |
+| Model updates | ✅ `scripts/train_model.py`: fine-tune with site false alarms, promote only if better, hot-swap, rollback |
+| Not yet | ⚠️ Accuracy on *your* scenes must be measured in a site trial; small flames are often missed; Windows installer unverified; sunset/fog compensation not implemented; not certified for life safety |
 
 **Quick start**
 ```bash
 python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
-python run_sentinel.py            # headless API + detection on http://127.0.0.1:8765
+sudo ./scripts/install.sh         # production: systemd service + watchdog (docs/OPERATIONS.md)
+python run_sentinel.py            # development: headless API + detection on http://127.0.0.1:8765
 npm install && npm run tauri dev  # desktop app (starts the backend itself)
-pytest tests/                     # 60 tests incl. real-fire-image regression tests
+pytest tests/                     # test suite incl. real-fire-image regression tests
 ```
 
 ---

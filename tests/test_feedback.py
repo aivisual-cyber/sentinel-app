@@ -72,3 +72,16 @@ def test_test_verdict_not_exported(mgr, tmp_path):
     a = _alert(mgr, tmp_path, "c", "P1")
     assert mgr.set_verdict(a.id, "test")["exported"] is None
     assert mgr.trial_report(1)["overall"]["tests"] == 1
+
+
+def test_rates_withheld_until_a_full_day(mgr, tmp_path):
+    a = _alert(mgr, tmp_path, "c", "P1")
+    mgr.set_verdict(a.id, "false_alarm")
+    rep = mgr.trial_report(7)
+    assert rep["rates_available"] is False
+    assert rep["overall"]["false_alarms_per_day"] is None and rep["overall"]["p1_false_alarms"] == 1
+    import sqlite3
+    with sqlite3.connect(mgr.database.db_path) as c:   # pretend the trial started 2 days ago
+        c.execute("UPDATE alerts SET timestamp = timestamp - 2 * 86400")
+    rep = mgr.trial_report(7)
+    assert rep["rates_available"] and rep["overall"]["false_alarms_per_day"] == pytest.approx(0.5, abs=0.01)

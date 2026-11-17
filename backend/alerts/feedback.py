@@ -102,7 +102,9 @@ def trial_report(db_path, days: float = 7.0) -> Dict:
         rows = [dict(r) for r in c.execute(
             "SELECT id, timestamp, camera_id, alert_level, confidence, status, verdict, acknowledged_at "
             "FROM alerts WHERE timestamp > ? ORDER BY timestamp", (since,))]
-    span_days = max((time.time() - rows[0]['timestamp']) / 86400, 1 / 24) if rows else days
+    span_days = (time.time() - rows[0]['timestamp']) / 86400 if rows else 0.0
+    # Per-day rates extrapolated from hours of data are misleading: only report them after >= 1 day
+    rate_ok = span_days >= 1.0
 
     def summarise(items):
         fire = sum(r['verdict'] == 'fire' for r in items)
@@ -116,15 +118,17 @@ def trial_report(db_path, days: float = 7.0) -> Dict:
             'tests': sum(r['verdict'] == 'test' for r in items),
             'unverified': sum(r['verdict'] is None for r in items),
             'precision': round(fire / (fire + fa), 3) if fire + fa else None,
-            'false_alarms_per_day': round(fa / span_days, 2),
+            'false_alarms_per_day': round(fa / span_days, 2) if rate_ok else None,
+            'p1_false_alarms': sum(r['verdict'] == 'false_alarm' and r['alert_level'] == 'P1' for r in items),
             'p1_false_alarms_per_day': round(sum(r['verdict'] == 'false_alarm' and r['alert_level'] == 'P1'
-                                                 for r in items) / span_days, 2),
+                                                 for r in items) / span_days, 2) if rate_ok else None,
             'median_ack_seconds': round(statistics.median(ack), 1) if ack else None,
         }
 
     cams = sorted({r['camera_id'] for r in rows})
     return {
         'days': days, 'observed_days': round(span_days, 2), 'generated_at': time.time(),
+        'rates_available': rate_ok,
         'overall': summarise(rows),
         'cameras': {cam: summarise([r for r in rows if r['camera_id'] == cam]) for cam in cams},
         'verified_fraction': round(sum(r['verdict'] is not None for r in rows) / len(rows), 3) if rows else None,

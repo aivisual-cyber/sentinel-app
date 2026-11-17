@@ -14,7 +14,7 @@ const readiness = (o, verifiedFraction, observedDays) => {
   if (!o || o.alerts === 0) return { text: 'No alerts yet in this window. Keep the trial running.', cls: 'text-gray-400' };
   if ((verifiedFraction ?? 0) < 0.8) return { text: `Only ${pct(verifiedFraction)} of alerts verified – mark every alert in Incident Management.`, cls: 'text-warning-400' };
   if (observedDays < 14) return { text: `${observedDays} days observed – run at least 14 days before deciding.`, cls: 'text-warning-400' };
-  if (o.p1_false_alarms_per_day > 0.2) return { text: 'P1 false alarms are too frequent: raise P1 or retrain with site false alarms.', cls: 'text-red-400' };
+  if (o.p1_false_alarms_per_day !== null && o.p1_false_alarms_per_day > 0.2) return { text: 'P1 false alarms are too frequent: raise P1 or retrain with site false alarms.', cls: 'text-red-400' };
   return { text: 'Trial metrics look acceptable for supplementary use. Review per camera below.', cls: 'text-emerald-400' };
 };
 
@@ -68,7 +68,10 @@ const SiteTrialPanel = () => {
           <div className="grid grid-cols-6 gap-4 mb-3">
             {[
               ['Alerts', o.alerts], ['Verified', pct(report.verified_fraction)], ['Precision', pct(o.precision)],
-              ['False alarms / day', num(o.false_alarms_per_day)], ['P1 false alarms / day', num(o.p1_false_alarms_per_day)],
+              report.rates_available
+                ? ['False alarms / day', num(o.false_alarms_per_day)] : ['False alarms (total)', o.false_alarms],
+              report.rates_available
+                ? ['P1 false alarms / day', num(o.p1_false_alarms_per_day)] : ['P1 false alarms (total)', o.p1_false_alarms],
               ['Median time to ack', o.median_ack_seconds === null ? '—' : `${Math.round(o.median_ack_seconds)} s`],
             ].map(([k, v]) => (
               <div key={k} className="bg-gray-800/50 rounded-lg p-3">
@@ -78,10 +81,13 @@ const SiteTrialPanel = () => {
             ))}
           </div>
           <p className={`text-sm mb-3 ${r.cls}`}>{r.text}</p>
+          {!report.rates_available && (
+            <p className="text-xs text-gray-500 mb-3">Per-day rates appear after one full day of data (extrapolating from hours is misleading).</p>
+          )}
           {Object.keys(report.cameras).length > 0 && (
             <table className="w-full text-sm">
               <thead><tr className="text-gray-400 text-left">
-                <th className="py-1">Camera</th><th>Alerts</th><th>P1/P2/P4</th><th>Real fire</th><th>False alarms</th><th>Unverified</th><th>Precision</th><th>FA/day</th>
+                <th className="py-1">Camera</th><th>Alerts</th><th>P1/P2/P4</th><th>Real fire</th><th>False alarms</th><th>Unverified</th><th>Precision</th><th>{report.rates_available ? 'FA/day' : 'FA'}</th>
               </tr></thead>
               <tbody>
                 {Object.entries(report.cameras).map(([cam, c]) => (
@@ -89,7 +95,7 @@ const SiteTrialPanel = () => {
                     <td className="py-1 font-mono">{cam}</td><td>{c.alerts}</td>
                     <td>{c.by_level.P1}/{c.by_level.P2}/{c.by_level.P4}</td>
                     <td>{c.verified_fire}</td><td>{c.false_alarms}</td><td>{c.unverified}</td>
-                    <td>{pct(c.precision)}</td><td>{c.false_alarms_per_day}</td>
+                    <td>{pct(c.precision)}</td><td>{report.rates_available ? c.false_alarms_per_day : c.false_alarms}</td>
                   </tr>
                 ))}
               </tbody>

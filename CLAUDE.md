@@ -105,6 +105,10 @@ sunset_hours: [17, 19]   # Higher thresholds during challenging light
 > Key facts for development: paths resolve from SENTINEL_HOME (backend/paths.py); model + class names +
 > thresholds + temporal confirmation live in config/detection_config.yaml; external alerts in
 > config/notifications.yaml (secrets via env vars); Tauri commands use snake_case args; run `pytest tests/`.
+> Production runs the backend as a systemd service (deploy/linux, scripts/install.sh); the Tauri app is a
+> client using /etc/sentinel/api_token. Health: /api/health (healthy|degraded|critical + issues); watchdog:
+> scripts/watchdog.py; operator verdicts + site trial: backend/alerts/feedback.py; retraining with gated
+> promotion: scripts/train_model.py; capacity: scripts/benchmark.py. Ops guide: docs/OPERATIONS.md.
 
 ### Original roadmap status (historical)
 

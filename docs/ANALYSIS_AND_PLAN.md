@@ -568,3 +568,36 @@ All verified with `pytest` (**51 passed**, previously 37 passed / 2 failed), `ca
 3. **Operational hardening.** A watchdog that alerts when Sentinel itself stops (e.g. external heartbeat to the webhook), log rotation, and a documented operator procedure.
 
 **Recommended next steps (priority):** (1) site shadow trial with an "operator verdict" button on each alert to collect ground truth → real accuracy/false-alarm metrics in Analytics; (2) fine-tune YOLO11s on D-Fire + FASDD + site negatives, select by recall at ≤1 % false alarms; (3) sidecar packaging + heartbeat watchdog; (4) delete or wire the dormant modules.
+
+---
+
+## 12. Round 3 — production readiness (verified)
+
+Goal: close the three blockers in §11 (unmeasured site performance, packaging, self-monitoring) and make the project something a site can deploy, trial, and improve. Operator/installer documentation: **[docs/OPERATIONS.md](OPERATIONS.md)**.
+
+| # | Capability | What was built | Verification |
+|---|---|---|---|
+| S1 | **Ground truth** | Operator verdict per alert (REAL FIRE / FALSE ALARM / TEST) from Incident Management; verdict acknowledges; raw frame saved per alert | Live: buttons → verdict badges; API rejects invalid verdicts; tests |
+| S2 | **Site-trial metrics** | Per-camera & overall precision, false alarms/day, **P1 false alarms/day**, verified fraction, median time-to-acknowledge, readiness hint; CSV export; per-day rates withheld until ≥ 1 day observed (extrapolating from an hour showed "48/day") | Live (Analytics → Site trial, CSV download); tests |
+| S3 | **Feedback dataset** | False alarms → hard negatives (empty labels); real fires → pseudo-labelled positives; YOLO format under `data/feedback` | Live; label geometry tested |
+| S4 | **Health self-assessment** | `/api/health`: healthy / degraded / critical with issues: stalled loop, frames not analysed, camera offline/frozen, overload, failing delivery; warm-up ignored | Tests with stalled/frozen/overloaded states; live (overload → healthy after warm-up) |
+| S5 | **Dead-man's switch** | Optional heartbeat ping only while detection works | Config + code path |
+| S6 | **Independent watchdog** | `scripts/watchdog.py` (no torch import): debounced DOWN / DEGRADED / RECOVERED notifications, unreachable detection, optional restart of a hung service; systemd timer | Tests against real HTTP health + webhook servers |
+| S7 | **Service deployment** | systemd `sentinel.service` (Restart=always, StartLimitIntervalSec=0, sandboxed) + watchdog timer; rewritten installer (788 → ~170 lines) with test options | `systemd-analyze verify` clean (it caught a misplaced `StartLimitIntervalSec`); install → run as systemd would (cwd `/`, env file) → health, cameras, alerts, verdicts → **in-place upgrade kept token, config, cameras** |
+| S8 | **UI as client** | Desktop app attaches to the service via `/etc/sentinel/api_token` (or env / ProgramData); spawns a backend only in development; header shows health issues | `cargo check`; live walkthrough with the service token |
+| S9 | **Model improvement** | `scripts/train_model.py`: dataset builder (public sets with class remap + site feedback + negatives), fine-tune, evaluate recall @ false-alarm budget, **promote only if better**, history log; running service **hot-swaps** the model, rejects broken models, rollback by config | Real CPU run: 296 train / 102 val images → candidate recall@2 %FA 50.7 % vs 8.7 % but P4 false alarms 21 % vs 9 % → **correctly rejected**; live hot-swap, rejection, rollback on the installed service; tests |
+| S10 | **Throughput** | Batched inference across cameras; capacity benchmark; overload surfaced in health | Batch == per-frame results (test); CPU capacity **4 cameras @ 2 FPS** (≈ 60 ms/frame) |
+| S11 | **Cleanup** | Removed unwired/synthetic modules (`network_monitor`, `performance_optimizer`, `model_trainer`, `rtsp_advanced`, `field_test_suite`) and 5 duplicate COCO weight files | Tests, builds |
+| S12 | **Docker** | Compose with watchdog container; status-aware healthcheck (fails on `critical`) | Healthcheck command run against live service; compose parsed |
+
+![Verdicts](analysis/v3_incidents_verdicts.png)
+![History with verdict badges](analysis/v3_history.png)
+![Site trial panel (before the per-day-rate fix)](analysis/v3_trial_before_rate_fix.png)
+
+### Updated verdict
+
+**Deployable for a supervised site trial: yes.** Install is one command, the service survives crashes and hangs, operators are alerted (siren, notifications, watchdog, heartbeat), and the trial produces the evidence needed for a go/no-go decision.
+
+**Production reliance: decide per site, from the trial data.** The remaining uncertainty is model accuracy on each site's scenes — now *measurable* (site trial) and *improvable* (feedback → retrain → gated promotion), rather than assumed.
+
+**Still open:** GPU capacity numbers (benchmark on target hardware), a GPU training run on D-Fire + site negatives, Windows installer (`install.ps1` not updated/verified), multi-user roles/audit of operator identity, sunset/fog compensation.
